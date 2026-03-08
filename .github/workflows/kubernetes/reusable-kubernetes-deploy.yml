@@ -1,0 +1,54 @@
+name: Reusable Kubernetes Deployment
+
+on:
+  workflow_call:
+    inputs:
+      namespace:
+        required: false
+        type: string
+        default: default
+      manifests_path:
+        required: false
+        type: string
+        default: k8s/
+      kubectl_version:
+        required: false
+        type: string
+        default: v1.31.2
+      dry_run:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      kubeconfig:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ inputs.kubectl_version }}
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${KUBECONFIG_CONTENT}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+        env:
+          KUBECONFIG_CONTENT: ${{ secrets.kubeconfig }}
+
+      - name: Validate manifests server-side
+        run: kubectl apply --namespace "${{ inputs.namespace }}" --dry-run=server -f "${{ inputs.manifests_path }}"
+
+      - name: Deploy manifests
+        if: ${{ !inputs.dry_run }}
+        run: kubectl apply --namespace "${{ inputs.namespace }}" -f "${{ inputs.manifests_path }}"

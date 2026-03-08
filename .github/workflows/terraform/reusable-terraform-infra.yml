@@ -1,0 +1,85 @@
+name: Reusable Terraform Infrastructure Automation
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: Directory containing Terraform files
+        required: false
+        type: string
+        default: terraform
+      terraform_version:
+        description: Terraform version to use
+        required: false
+        type: string
+        default: 1.9.8
+      apply:
+        description: Apply terraform plan (true/false)
+        required: false
+        type: boolean
+        default: false
+      environment:
+        description: GitHub environment name
+        required: false
+        type: string
+        default: nonprod
+    secrets:
+      tf_api_token:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  terraform:
+    name: Terraform fmt, validate, plan/apply
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          cli_config_credentials_token: ${{ secrets.tf_api_token }}
+
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        run: terraform validate -no-color
+
+      - name: Terraform plan
+        id: plan
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Terraform plan summary
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const output = `${{ steps.plan.outcome }}`;
+            const body = `### Terraform plan status\n\nResult: **${output}**\n\nWorkflow: \`${context.workflow}\``;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Terraform apply
+        if: inputs.apply
+        run: terraform apply -input=false -auto-approve tfplan
