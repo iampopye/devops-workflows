@@ -1,4 +1,4 @@
-# my-Workflows: Reusable GitHub Actions for DevSecOps
+# my-Workflows: Reusable GitHub Actions for DevOps Engineers
 
 This repository has been modernized from legacy `.txt` workflow drafts into reusable GitHub Actions workflows using `workflow_call`.
 
