@@ -32,15 +32,10 @@ permissions:
   id-token: write
   pull-requests: write
 
-concurrency:
-  group: terraform-${{ github.repository }}-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   terraform:
     name: Terraform fmt, validate, plan/apply
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     environment: ${{ inputs.environment }}
     defaults:
       run:
@@ -75,9 +70,10 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
+            const fs = require('fs');
             const output = `${{ steps.plan.outcome }}`;
             const body = `### Terraform plan status\n\nResult: **${output}**\n\nWorkflow: \`${context.workflow}\``;
-            await github.rest.issues.createComment({
+            github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,

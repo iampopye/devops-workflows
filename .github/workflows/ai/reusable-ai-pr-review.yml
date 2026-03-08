@@ -7,10 +7,6 @@ on:
         required: false
         type: string
         default: gpt-4o-mini
-      max_changed_files:
-        required: false
-        type: number
-        default: 100
     secrets:
       openai_api_key:
         required: true
@@ -19,42 +15,25 @@ permissions:
   contents: read
   pull-requests: write
 
-concurrency:
-  group: ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
-
 jobs:
   ai-pr-review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - name: Build PR patch summary
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build PR diff
         id: diff
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const { owner, repo } = context.repo;
-            const pull_number = context.payload.pull_request.number;
-            const perPage = Number('${{ inputs.max_changed_files }}') || 100;
-            const files = await github.paginate(github.rest.pulls.listFiles, {
-              owner,
-              repo,
-              pull_number,
-              per_page: Math.min(perPage, 100)
-            });
-
-            const compact = files.slice(0, perPage).map(f => ({
-              filename: f.filename,
-              status: f.status,
-              additions: f.additions,
-              deletions: f.deletions,
-              patch: (f.patch || '').slice(0, 3000)
-            }));
-
-            const payload = JSON.stringify(compact, null, 2);
-            core.setOutput('diff', payload.slice(0, 50000));
+        run: |
+          gh pr diff ${{ github.event.pull_request.number }} > pr.diff
+          {
+            echo "diff<<EOF"
+            sed -n '1,400p' pr.diff
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: AI review comment
         uses: actions/github-script@v7
@@ -65,7 +44,7 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
-            const prompt = `Review this pull request patch summary with focus on security, reliability, and maintainability. Return concise findings, risk level, and concrete recommendations.\n\n${process.env.DIFF_TEXT}`;
+            const prompt = `Review this pull request diff with focus on security, reliability, and maintainability. Provide concise findings and actionable suggestions:\n\n${process.env.DIFF_TEXT}`;
             const res = await fetch('https://api.openai.com/v1/chat/completions', {
               method: 'POST',
               headers: {
@@ -81,13 +60,6 @@ jobs:
                 temperature: 0.2
               })
             });
-
-            if (!res.ok) {
-              const body = await res.text();
-              core.setFailed(`OpenAI API error (${res.status}): ${body}`);
-              return;
-            }
-
             const data = await res.json();
             const review = data.choices?.[0]?.message?.content || 'AI review unavailable.';
             await github.rest.issues.createComment({

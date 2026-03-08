@@ -1,4 +1,4 @@
-# my-Workflows: Reusable GitHub Actions for DevSecOps
+# my-Workflows: Reusable GitHub Actions for DevOps Engineers
 
 This repository has been modernized from legacy `.txt` workflow drafts into reusable GitHub Actions workflows using `workflow_call`.
 
@@ -28,9 +28,9 @@ Reusable workflows are grouped by domain:
 - Uses current major versions of core actions (`checkout@v4`, `setup-*` latest stable, `build-push-action@v6`, `codeql-action@v3`).
 - All reusable workflows are triggerable via `workflow_call`.
 - Least-privilege permissions are defined at workflow/job scope.
-- Security coverage includes SAST (CodeQL), dependency/IaC scanning (Trivy), dependency review, secrets scanning (Gitleaks), and optional DAST (ZAP).
+- Security coverage includes SAST (CodeQL), dependency/IaC scanning (Trivy), secrets scanning (Gitleaks), and optional DAST (ZAP).
 - Compliance baseline workflow supports HIPAA/GDPR-aligned controls through policy validation + security scanning.
-- AI workflows support PR review automation and incident analysis, with API error handling and safer data collection.
+- AI workflows support PR review automation and incident analysis.
 
 ## Reusable workflow catalog
 
@@ -39,7 +39,6 @@ Reusable workflows are grouped by domain:
 - Features:
   - CodeQL scan
   - Trivy file-system vulnerability scan + SARIF upload
-  - Dependency review for pull requests
   - Gitleaks secret scanning
   - Optional OWASP ZAP baseline DAST scan
 
@@ -49,7 +48,6 @@ Reusable workflows are grouped by domain:
   - `fmt`, `init`, `validate`, `plan`
   - Optional `apply`
   - PR comment with plan status
-  - Concurrency and timeout controls
 
 ### 3) Docker build and push
 - File: `.github/workflows/docker/reusable-docker-build.yml`
@@ -67,14 +65,14 @@ Reusable workflows are grouped by domain:
 ### 5) AI-assisted PR review
 - File: `.github/workflows/ai/reusable-ai-pr-review.yml`
 - Features:
-  - Pulls changed files/patches directly from GitHub API
+  - Extracts PR diff
   - Uses OpenAI API to generate review feedback
   - Posts bot review comment to PR
 
 ### 6) AI incident analysis
 - File: `.github/workflows/ai/reusable-ai-incident-analysis.yml`
 - Features:
-  - Summarizes recent failed completed workflow runs
+  - Summarizes recent failed workflow runs
   - Uses OpenAI API to generate incident analysis
   - Opens a GitHub issue with findings/remediation
 
@@ -145,62 +143,3 @@ jobs:
 ## Migration note
 
 The legacy `.txt` workflow files are still present as historical references. The reusable YAML workflows above are the new canonical implementation.
-
-## Keeping your branch merge-ready with `main`
-
-If your feature branch reports merge conflicts against `main`, sync frequently using one of these approaches:
-
-### Option A: Rebase (clean linear history)
-```bash
-git fetch origin
-git rebase origin/main
-```
-
-### Option B: Merge `main` into your branch
-```bash
-git fetch origin
-git merge origin/main
-```
-
-After resolving conflicts, run local checks and push updates to refresh the PR mergeability status.
-
-## Repository protection (recommended for `main`)
-
-To enforce that visitors can only **clone/fork** and cannot push code directly to your repository, configure GitHub repository settings as follows:
-
-1. **Repository visibility and base permissions**
-   - Keep repository **Public** (or Private as needed).
-   - In **Settings → Collaborators and teams**, grant write/admin access only to trusted maintainers.
-   - Visitors without write access can only clone/fork by default.
-
-2. **Protect `main` branch**
-   - Go to **Settings → Branches → Add branch protection rule** for `main`.
-   - Enable:
-     - **Require a pull request before merging**
-     - **Require approvals** (suggest: 1+)
-     - **Require status checks to pass before merging**
-     - **Require conversation resolution before merging**
-     - **Do not allow bypassing the above settings**
-     - **Restrict who can push to matching branches** (set to maintainers only)
-     - **Allow force pushes**: disabled
-     - **Allow deletions**: disabled
-
-3. **Use CODEOWNERS for mandatory reviews**
-   - This repo includes `.github/CODEOWNERS` with owner review requirement.
-
-### Optional GitHub CLI API setup (branch protection)
-
-```bash
-gh api \
-  -X PUT \
-  repos/iampopye/devops-workflows/branches/main/protection \
-  -H "Accept: application/vnd.github+json" \
-  -f required_status_checks.strict=true \
-  -f enforce_admins=true \
-  -f required_pull_request_reviews.required_approving_review_count=1 \
-  -f restrictions='null' \
-  -f allow_force_pushes=false \
-  -f allow_deletions=false
-```
-
-> Note: branch protection is a repository setting and must be applied in GitHub UI/API (not only via workflow files).

@@ -11,10 +11,6 @@ on:
         required: false
         type: string
         default: ""
-      max_failed_runs:
-        required: false
-        type: number
-        default: 5
     secrets:
       openai_api_key:
         required: true
@@ -24,14 +20,9 @@ permissions:
   contents: read
   issues: write
 
-concurrency:
-  group: ai-incident-analysis-${{ github.repository }}
-  cancel-in-progress: false
-
 jobs:
   incident-analysis:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - name: Analyze failed runs with AI
         uses: actions/github-script@v7
@@ -39,35 +30,18 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.openai_api_key }}
           MODEL: ${{ inputs.model }}
           INCIDENT_CONTEXT: ${{ inputs.incident_context }}
-          MAX_FAILED_RUNS: ${{ inputs.max_failed_runs }}
         with:
           github-token: ${{ github.token }}
           script: |
             const { owner, repo } = context.repo;
-            const maxRuns = Number(process.env.MAX_FAILED_RUNS || '5');
-            const runs = await github.rest.actions.listWorkflowRunsForRepo({
-              owner,
-              repo,
-              per_page: 30,
-              status: 'completed'
-            });
-
-            const failures = runs.data.workflow_runs
-              .filter(r => r.conclusion === 'failure')
-              .slice(0, maxRuns)
-              .map(r => ({
-                name: r.name,
-                run_number: r.run_number,
-                url: r.html_url,
-                conclusion: r.conclusion,
-                created_at: r.created_at
-              }));
-
-            if (failures.length === 0) {
-              core.info('No recent failed workflow runs found; skipping issue creation.');
-              return;
-            }
-
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({ owner, repo, per_page: 5, status: 'failure' });
+            const failures = runs.data.workflow_runs.map(r => ({
+              name: r.name,
+              run_number: r.run_number,
+              url: r.html_url,
+              conclusion: r.conclusion,
+              created_at: r.created_at
+            }));
             const prompt = `Analyze these recent CI/CD failures and produce: probable root cause, blast radius, immediate mitigations, and prevention steps.\n\nFailures: ${JSON.stringify(failures, null, 2)}\n\nContext: ${process.env.INCIDENT_CONTEXT}`;
             const aiResp = await fetch('https://api.openai.com/v1/chat/completions', {
               method: 'POST',
@@ -84,13 +58,6 @@ jobs:
                 temperature: 0.1
               })
             });
-
-            if (!aiResp.ok) {
-              const body = await aiResp.text();
-              core.setFailed(`OpenAI API error (${aiResp.status}): ${body}`);
-              return;
-            }
-
             const aiData = await aiResp.json();
             const analysis = aiData.choices?.[0]?.message?.content || 'Analysis unavailable.';
             await github.rest.issues.create({
