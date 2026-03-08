@@ -163,3 +163,44 @@ git merge origin/main
 ```
 
 After resolving conflicts, run local checks and push updates to refresh the PR mergeability status.
+
+## Repository protection (recommended for `main`)
+
+To enforce that visitors can only **clone/fork** and cannot push code directly to your repository, configure GitHub repository settings as follows:
+
+1. **Repository visibility and base permissions**
+   - Keep repository **Public** (or Private as needed).
+   - In **Settings → Collaborators and teams**, grant write/admin access only to trusted maintainers.
+   - Visitors without write access can only clone/fork by default.
+
+2. **Protect `main` branch**
+   - Go to **Settings → Branches → Add branch protection rule** for `main`.
+   - Enable:
+     - **Require a pull request before merging**
+     - **Require approvals** (suggest: 1+)
+     - **Require status checks to pass before merging**
+     - **Require conversation resolution before merging**
+     - **Do not allow bypassing the above settings**
+     - **Restrict who can push to matching branches** (set to maintainers only)
+     - **Allow force pushes**: disabled
+     - **Allow deletions**: disabled
+
+3. **Use CODEOWNERS for mandatory reviews**
+   - This repo includes `.github/CODEOWNERS` with owner review requirement.
+
+### Optional GitHub CLI API setup (branch protection)
+
+```bash
+gh api \
+  -X PUT \
+  repos/iampopye/devops-workflows/branches/main/protection \
+  -H "Accept: application/vnd.github+json" \
+  -f required_status_checks.strict=true \
+  -f enforce_admins=true \
+  -f required_pull_request_reviews.required_approving_review_count=1 \
+  -f restrictions='null' \
+  -f allow_force_pushes=false \
+  -f allow_deletions=false
+```
+
+> Note: branch protection is a repository setting and must be applied in GitHub UI/API (not only via workflow files).
