@@ -145,3 +145,21 @@ jobs:
 ## Migration note
 
 The legacy `.txt` workflow files are still present as historical references. The reusable YAML workflows above are the new canonical implementation.
+
+## Keeping your branch merge-ready with `main`
+
+If your feature branch reports merge conflicts against `main`, sync frequently using one of these approaches:
+
+### Option A: Rebase (clean linear history)
+```bash
+git fetch origin
+git rebase origin/main
+```
+
+### Option B: Merge `main` into your branch
+```bash
+git fetch origin
+git merge origin/main
+```
+
+After resolving conflicts, run local checks and push updates to refresh the PR mergeability status.
