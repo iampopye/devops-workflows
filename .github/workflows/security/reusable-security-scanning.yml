@@ -1,0 +1,101 @@
+name: Reusable DevSecOps Security Scanning
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: Primary language for CodeQL
+        required: false
+        type: string
+        default: go
+      fail_on_trivy_severity:
+        description: Comma separated severities to fail build on
+        required: false
+        type: string
+        default: CRITICAL,HIGH
+      zap_target_url:
+        description: Optional target URL for baseline DAST scan
+        required: false
+        type: string
+        default: ""
+    secrets:
+      github_token:
+        required: false
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  codeql:
+    name: CodeQL SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ inputs.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+
+  dependency-and-secret-scan:
+    name: Dependency + Secret Scans
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency Review (PR only)
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+
+      - name: Trivy FS scan (SARIF)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: ${{ inputs.fail_on_trivy_severity }}
+          ignore-unfixed: true
+          exit-code: 1
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.github_token || github.token }}
+
+  dast-zap-baseline:
+    name: DAST baseline (optional)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: ${{ inputs.zap_target_url != '' }}
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Baseline ZAP scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: ${{ inputs.zap_target_url }}
+          allow_issue_writing: false
