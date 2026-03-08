@@ -1,30 +1,145 @@
-GitHub Workflows Repository
-Welcome to my GitHub repository, where I have meticulously documented various CI/CD workflows and tools for improving development efficiency and project quality. These workflows are currently stored in .txt format to ensure they do not execute automatically. To activate and use these workflows, you need to convert them into .yaml files and place them in the .git/workflows/ directory.
+# my-Workflows: Reusable GitHub Actions for DevSecOps
 
-This repository serves as a showcase of my skills and knowledge in creating and managing workflows for software development projects.
+This repository has been modernized from legacy `.txt` workflow drafts into reusable GitHub Actions workflows using `workflow_call`.
 
-Available Workflow Files
-Below is the list of workflow files included in this repository:
+## What is included
 
-Go Tests and SonarQube Analysis
-Purpose: Run unit tests for Go applications and perform SonarQube analysis for code quality.
+Reusable workflows are grouped by domain:
 
-SonarQube and Unit Testing
-Purpose: Execute unit tests and integrate SonarQube to identify bugs, vulnerabilities, and code smells.
+```text
+.github/workflows/
+  terraform/
+    reusable-terraform-infra.yml
+  docker/
+    reusable-docker-build.yml
+  kubernetes/
+    reusable-kubernetes-deploy.yml
+  security/
+    reusable-security-scanning.yml
+  ai/
+    reusable-ai-pr-review.yml
+    reusable-ai-incident-analysis.yml
+  observability/
+    reusable-compliance-validation.yml
+```
 
-Cucumber Tests
-Purpose: Execute BDD scenarios using Cucumber.
+## Security and modernization highlights
 
-K6 Load Test Script
-Purpose: Perform load testing using the K6 tool.
+- Uses current major versions of core actions (`checkout@v4`, `setup-*` latest stable, `build-push-action@v6`, `codeql-action@v3`).
+- All reusable workflows are triggerable via `workflow_call`.
+- Least-privilege permissions are defined at workflow/job scope.
+- Security coverage includes SAST (CodeQL), dependency/IaC scanning (Trivy), secrets scanning (Gitleaks), and optional DAST (ZAP).
+- Compliance baseline workflow supports HIPAA/GDPR-aligned controls through policy validation + security scanning.
+- AI workflows support PR review automation and incident analysis.
 
-Sonar Scan
-Purpose: Execute a standalone SonarQube scan for code quality analysis.
+## Reusable workflow catalog
 
-OWASP ZAP Integration
-Purpose: Integrate ZAP for dynamic application security testing.
+### 1) Security scanning
+- File: `.github/workflows/security/reusable-security-scanning.yml`
+- Features:
+  - CodeQL scan
+  - Trivy file-system vulnerability scan + SARIF upload
+  - Gitleaks secret scanning
+  - Optional OWASP ZAP baseline DAST scan
 
-Contributing
-Contributions to improve or extend these workflows are welcome! If you have suggestions or new ideas, feel free to fork this repository, make changes, and submit a pull request.
+### 2) Terraform infrastructure automation
+- File: `.github/workflows/terraform/reusable-terraform-infra.yml`
+- Features:
+  - `fmt`, `init`, `validate`, `plan`
+  - Optional `apply`
+  - PR comment with plan status
 
-By keeping these workflows in .txt format initially, I ensure they serve as references and are only executed intentionally. This approach demonstrates my commitment to responsible development practices and showcases my expertise in setting up CI/CD pipelines.
+### 3) Docker build and push
+- File: `.github/workflows/docker/reusable-docker-build.yml`
+- Features:
+  - Buildx cache-enabled builds
+  - Optional registry login and push
+
+### 4) Kubernetes deployment
+- File: `.github/workflows/kubernetes/reusable-kubernetes-deploy.yml`
+- Features:
+  - Kubeconfig from secret (base64)
+  - Server-side dry-run validation
+  - Optional deployment
+
+### 5) AI-assisted PR review
+- File: `.github/workflows/ai/reusable-ai-pr-review.yml`
+- Features:
+  - Extracts PR diff
+  - Uses OpenAI API to generate review feedback
+  - Posts bot review comment to PR
+
+### 6) AI incident analysis
+- File: `.github/workflows/ai/reusable-ai-incident-analysis.yml`
+- Features:
+  - Summarizes recent failed workflow runs
+  - Uses OpenAI API to generate incident analysis
+  - Opens a GitHub issue with findings/remediation
+
+### 7) Compliance validation (HIPAA/GDPR aligned)
+- File: `.github/workflows/observability/reusable-compliance-validation.yml`
+- Features:
+  - Trivy config/IaC scan + SARIF upload
+  - OPA policy testing support
+  - Compliance coverage summary in workflow output
+
+## Usage examples
+
+Create a calling workflow in another repository (or this repository) such as:
+
+```yaml
+name: Platform CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  security:
+    uses: your-org/my-Workflows/.github/workflows/security/reusable-security-scanning.yml@main
+    with:
+      language: go
+      zap_target_url: ""
+
+  terraform-plan:
+    uses: your-org/my-Workflows/.github/workflows/terraform/reusable-terraform-infra.yml@main
+    with:
+      working_directory: terraform
+      apply: false
+
+  docker-build:
+    uses: your-org/my-Workflows/.github/workflows/docker/reusable-docker-build.yml@main
+    with:
+      image_name: ghcr.io/your-org/your-app
+      push: false
+
+  compliance:
+    uses: your-org/my-Workflows/.github/workflows/observability/reusable-compliance-validation.yml@main
+```
+
+### AI usage example
+
+```yaml
+name: AI PR Review
+on:
+  pull_request:
+
+jobs:
+  ai-review:
+    uses: your-org/my-Workflows/.github/workflows/ai/reusable-ai-pr-review.yml@main
+    secrets:
+      openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+```
+
+## Required secrets (by workflow)
+
+- Security: optional `github_token`
+- Terraform: optional `tf_api_token`
+- Docker: optional `registry`, `registry_username`, `registry_password`
+- Kubernetes: required `kubeconfig` (base64-encoded)
+- AI: required `openai_api_key`
+
+## Migration note
+
+The legacy `.txt` workflow files are still present as historical references. The reusable YAML workflows above are the new canonical implementation.

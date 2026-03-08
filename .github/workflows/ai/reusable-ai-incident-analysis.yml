@@ -1,0 +1,68 @@
+name: Reusable AI Incident Analysis
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        required: false
+        type: string
+        default: gpt-4o-mini
+      incident_context:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      openai_api_key:
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  incident-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Analyze failed runs with AI
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.openai_api_key }}
+          MODEL: ${{ inputs.model }}
+          INCIDENT_CONTEXT: ${{ inputs.incident_context }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({ owner, repo, per_page: 5, status: 'failure' });
+            const failures = runs.data.workflow_runs.map(r => ({
+              name: r.name,
+              run_number: r.run_number,
+              url: r.html_url,
+              conclusion: r.conclusion,
+              created_at: r.created_at
+            }));
+            const prompt = `Analyze these recent CI/CD failures and produce: probable root cause, blast radius, immediate mitigations, and prevention steps.\n\nFailures: ${JSON.stringify(failures, null, 2)}\n\nContext: ${process.env.INCIDENT_CONTEXT}`;
+            const aiResp = await fetch('https://api.openai.com/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                model: process.env.MODEL,
+                messages: [
+                  { role: 'system', content: 'You are an SRE incident commander assistant.' },
+                  { role: 'user', content: prompt }
+                ],
+                temperature: 0.1
+              })
+            });
+            const aiData = await aiResp.json();
+            const analysis = aiData.choices?.[0]?.message?.content || 'Analysis unavailable.';
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title: `AI Incident Analysis - ${new Date().toISOString().slice(0, 10)}`,
+              body: `## Automated Incident Analysis\n\n${analysis}`
+            });

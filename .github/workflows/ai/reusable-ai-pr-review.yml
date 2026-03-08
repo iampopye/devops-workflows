@@ -1,0 +1,70 @@
+name: Reusable AI-Assisted PR Review
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        required: false
+        type: string
+        default: gpt-4o-mini
+    secrets:
+      openai_api_key:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai-pr-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build PR diff
+        id: diff
+        run: |
+          gh pr diff ${{ github.event.pull_request.number }} > pr.diff
+          {
+            echo "diff<<EOF"
+            sed -n '1,400p' pr.diff
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: AI review comment
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.openai_api_key }}
+          MODEL: ${{ inputs.model }}
+          DIFF_TEXT: ${{ steps.diff.outputs.diff }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const prompt = `Review this pull request diff with focus on security, reliability, and maintainability. Provide concise findings and actionable suggestions:\n\n${process.env.DIFF_TEXT}`;
+            const res = await fetch('https://api.openai.com/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                model: process.env.MODEL,
+                messages: [
+                  { role: 'system', content: 'You are a senior DevSecOps reviewer.' },
+                  { role: 'user', content: prompt }
+                ],
+                temperature: 0.2
+              })
+            });
+            const data = await res.json();
+            const review = data.choices?.[0]?.message?.content || 'AI review unavailable.';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## 🤖 AI PR Review\n\n${review}`,
+            });
