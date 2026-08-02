@@ -526,6 +526,20 @@ Contributions and questions are both welcome. Read [CONTRIBUTING.md](CONTRIBUTIN
 
 If you are new to DevOps and something here does not make sense, **that is a documentation bug, and reporting it helps**. Open an issue or a discussion.
 
+## Maintainer
+
+**Karan Garg** — Senior Consultant
+
+Sr. DevOps & Multi-Cloud Infrastructure · Sr. DevSecOps & Compliance Leadership (CISO) · Data Engineering & Analytics · AI/GenAI & ML Engineering · Architecture Design · Cross-Team Delivery
+
+This repository exists because the gap between a tutorial pipeline and a pipeline you can actually put in front of production is wider than most learning material admits. Everything here is written to be read, not just run — the comments explain the reasoning, including the mistakes that motivated each decision.
+
+- **GitHub** — [@iampopye](https://github.com/iampopye)
+- **LinkedIn** — [karan-garg-tech](https://www.linkedin.com/in/karan-garg-tech/)
+- **X** — [@mrtechgarg](https://x.com/mrtechgarg)
+
+Questions about anything in this repo are welcome in [Discussions](https://github.com/iampopye/devops-workflows/discussions). If a workflow does not make sense to you, that is worth telling me — it usually means the documentation is at fault, not you.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Copy these workflows, modify them, use them at work. Attribution appreciated, not required.
