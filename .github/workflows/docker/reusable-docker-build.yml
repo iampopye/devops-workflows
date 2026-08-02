@@ -1,61 +1,158 @@
 name: Reusable Docker Build and Push
 
+# Buildx build with layer caching, semantic tagging, SBOM + provenance
+# attestation, and an optional image vulnerability scan before push.
+
 on:
   workflow_call:
     inputs:
       image_name:
+        description: Full image name without a tag, e.g. ghcr.io/owner/app
         required: true
         type: string
       context:
+        description: Build context path
         required: false
         type: string
         default: .
       dockerfile:
+        description: Path to the Dockerfile
         required: false
         type: string
         default: ./Dockerfile
+      platforms:
+        description: Comma separated target platforms, e.g. linux/amd64,linux/arm64
+        required: false
+        type: string
+        default: linux/amd64
       push:
+        description: Push the image to the registry after a successful build
         required: false
         type: boolean
         default: false
+      scan_image:
+        description: Run a Trivy vulnerability scan on the built image
+        required: false
+        type: boolean
+        default: true
+      scan_severity:
+        description: Severities that fail the image scan
+        required: false
+        type: string
+        default: CRITICAL,HIGH
     secrets:
+      registry:
+        required: false
       registry_username:
         required: false
       registry_password:
         required: false
-      registry:
-        required: false
+    outputs:
+      digest:
+        description: The immutable digest of the built image
+        value: ${{ jobs.build.outputs.digest }}
+      tags:
+        description: Newline separated list of tags applied to the image
+        value: ${{ jobs.build.outputs.tags }}
 
-permissions:
-  contents: read
-  packages: write
+permissions: {}
 
 jobs:
   build:
+    name: Build${{ inputs.push && ' and push' || '' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Required for build-push-action to sign the provenance attestation.
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        if: ${{ contains(inputs.platforms, ',') || !contains(inputs.platforms, 'amd64') }}
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - name: Login to container registry
-        if: inputs.push
-        uses: docker/login-action@v3
+      - name: Log in to container registry
+        if: ${{ inputs.push }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ secrets.registry || 'ghcr.io' }}
           username: ${{ secrets.registry_username || github.actor }}
           password: ${{ secrets.registry_password || github.token }}
 
-      - name: Build and optionally push
-        uses: docker/build-push-action@v6
+      - name: Derive image tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ inputs.image_name }}
+          # ':latest' only on the default branch. Tagging every feature branch
+          # as latest is how a half-finished build ends up in production.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          # Load into the local daemon when not pushing, so the scan below has
+          # something to read. Multi-platform builds cannot be loaded.
+          load: ${{ !inputs.push && !contains(inputs.platforms, ',') }}
           push: ${{ inputs.push }}
-          tags: |
-            ${{ inputs.image_name }}:latest
-            ${{ inputs.image_name }}:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Supply-chain metadata: what went into the image, and how it was built.
+          sbom: true
+          provenance: mode=max
+
+      # A multi-platform build cannot be `load`ed into the local daemon, so with
+      # push=false there is no image anywhere for Trivy to read. Scanning then
+      # fails on a reference that exists nowhere. Skip loudly instead of
+      # failing confusingly.
+      - name: Note skipped scan
+        if: ${{ inputs.scan_image && !inputs.push && contains(inputs.platforms, ',') }}
+        run: |
+          echo "::warning::Image scan skipped: a multi-platform build with push=false is never loaded locally, so there is no image to scan. Set push=true, or build a single platform, or set scan_image=false to silence this."
+
+      - name: Scan built image
+        if: ${{ inputs.scan_image && (inputs.push || !contains(inputs.platforms, ',')) }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ inputs.push && format('{0}@{1}', inputs.image_name, steps.build.outputs.digest) || fromJSON(steps.meta.outputs.json).tags[0] }}
+          severity: ${{ inputs.scan_severity }}
+          ignore-unfixed: true
+          exit-code: 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Docker build"
+            echo ""
+            echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`"
+            echo "- **Platforms:** \`${{ inputs.platforms }}\`"
+            echo "- **Pushed:** \`${{ inputs.push }}\`"
+            echo ""
+            echo "**Tags**"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

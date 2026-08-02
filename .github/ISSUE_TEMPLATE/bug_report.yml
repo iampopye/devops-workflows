@@ -1,0 +1,74 @@
+name: Bug report
+description: A workflow does not behave as documented
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thanks for reporting. The more of this you can fill in, the faster it
+        gets fixed. If a field genuinely does not apply, write "n/a".
+
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Which workflow?
+      options:
+        - security/reusable-security-scanning.yml
+        - terraform/reusable-terraform-infra.yml
+        - docker/reusable-docker-build.yml
+        - kubernetes/reusable-kubernetes-deploy.yml
+        - observability/reusable-compliance-validation.yml
+        - ai/reusable-ai-pr-review.yml
+        - ai/reusable-ai-incident-analysis.yml
+        - an example under examples/
+        - something else
+    validations:
+      required: true
+
+  - type: input
+    id: ref
+    attributes:
+      label: Version referenced
+      description: The ref after the `@` in your `uses:` line.
+      placeholder: v1
+    validations:
+      required: true
+
+  - type: textarea
+    id: caller
+    attributes:
+      label: Your calling workflow
+      description: >-
+        The job that calls this workflow. Redact secret VALUES, but please keep
+        the input names — that is usually where the problem is.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: >-
+        Paste the relevant log lines. Check first that they contain no tokens,
+        internal hostnames, or cloud account IDs.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked the log output for secrets before pasting it
+          required: true
+        - label: I read the input documentation in the README for this workflow
+          required: true

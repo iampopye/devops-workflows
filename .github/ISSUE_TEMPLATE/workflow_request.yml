@@ -1,0 +1,50 @@
+name: New workflow request
+description: Suggest a reusable workflow this collection should cover
+title: "[request] "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        The bar for adding a workflow here is that a new DevOps engineer could
+        copy it into a real project and have it work. Help make the case.
+
+  - type: input
+    id: what
+    attributes:
+      label: What should it do?
+      placeholder: e.g. Helm chart lint, package and publish to an OCI registry
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why does it belong here?
+      description: >-
+        What problem does it solve, and roughly how common is it? A workflow
+        that helps one team is a gist; one that helps many is worth maintaining.
+    validations:
+      required: true
+
+  - type: textarea
+    id: inputs
+    attributes:
+      label: Inputs and secrets you would expect
+      description: Rough sketch is fine.
+      render: yaml
+
+  - type: textarea
+    id: prior
+    attributes:
+      label: Existing implementation
+      description: >-
+        Link anything you already use, or paste a draft. A working draft is the
+        single fastest way to get this merged.
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Would you like to contribute it?
+      options:
+        - label: I am willing to open a PR for this (help is available if you are new)

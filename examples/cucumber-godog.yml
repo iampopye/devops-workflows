@@ -1,0 +1,53 @@
+# BDD acceptance tests with Godog (Cucumber for Go).
+#
+# Modernised from the original `cucmber.txt` draft (filename typo included):
+#   - actions/checkout v3 -> v7, setup-go v3 -> v7
+#   - go-version read from go.mod rather than pinned to a stale '1.20'
+#   - added a permissions block and dependency caching
+#   - separates the BDD suite from unit tests so a failure tells you which
+#     layer broke
+
+name: Cucumber (Godog) Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  bdd:
+    name: BDD acceptance tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run Godog feature tests
+        # Adjust the path to wherever your .feature files and step definitions
+        # live. `-run TestFeatures` targets the Godog suite specifically.
+        run: go test ./features/... -v -run TestFeatures
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: godog-report
+          path: |
+            **/report.json
+            **/*.xml
+          if-no-files-found: ignore
+          retention-days: 7

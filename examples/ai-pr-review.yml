@@ -1,0 +1,75 @@
+# Optional AI PR review. Nothing else in this repo depends on it.
+#
+# Pick ONE provider block below and delete the rest. There is no default model,
+# so nothing is assumed about which vendor you use -- including "none of them",
+# via a self-hosted endpoint.
+
+name: AI PR Review
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  # --- Option 1: Anthropic ---------------------------------------------------
+  review-anthropic:
+    uses: iampopye/devops-workflows/.github/workflows/ai/reusable-ai-pr-review.yml@v1
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      provider: anthropic
+      model: claude-opus-5
+    secrets:
+      ai_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  # --- Option 2: OpenAI ------------------------------------------------------
+  # review-openai:
+  #   uses: iampopye/devops-workflows/.github/workflows/ai/reusable-ai-pr-review.yml@v1
+  #   permissions:
+  #     contents: read
+  #     pull-requests: write
+  #   with:
+  #     provider: openai
+  #     model: gpt-4o          # check OpenAI's current model list
+  #   secrets:
+  #     ai_api_key: ${{ secrets.OPENAI_API_KEY }}
+
+  # --- Option 3: Groq (fast, generous free tier) -----------------------------
+  # review-groq:
+  #   uses: iampopye/devops-workflows/.github/workflows/ai/reusable-ai-pr-review.yml@v1
+  #   permissions:
+  #     contents: read
+  #     pull-requests: write
+  #   with:
+  #     provider: groq
+  #     model: llama-3.3-70b-versatile   # check Groq's current model list
+  #   secrets:
+  #     ai_api_key: ${{ secrets.GROQ_API_KEY }}
+
+  # --- Option 4: OpenRouter (one key, many vendors) --------------------------
+  # review-openrouter:
+  #   uses: iampopye/devops-workflows/.github/workflows/ai/reusable-ai-pr-review.yml@v1
+  #   permissions:
+  #     contents: read
+  #     pull-requests: write
+  #   with:
+  #     provider: openrouter
+  #     model: anthropic/claude-sonnet-4.5   # any model OpenRouter routes to
+  #   secrets:
+  #     ai_api_key: ${{ secrets.OPENROUTER_API_KEY }}
+
+  # --- Option 5: fully self-hosted, no third party ---------------------------
+  # Needs a self-hosted runner that can reach your endpoint. No API key at all
+  # if the endpoint is unauthenticated on your own network.
+  #
+  # review-local:
+  #   uses: iampopye/devops-workflows/.github/workflows/ai/reusable-ai-pr-review.yml@v1
+  #   permissions:
+  #     contents: read
+  #     pull-requests: write
+  #   with:
+  #     provider: openai_compatible
+  #     api_url: http://ollama.internal:11434/v1/chat/completions
+  #     model: qwen2.5-coder:32b

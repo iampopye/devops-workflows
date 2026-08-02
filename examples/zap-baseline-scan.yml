@@ -1,0 +1,64 @@
+# OWASP ZAP baseline DAST scan.
+#
+# Modernised from the original `zap-intergration.txt` draft (filename typo
+# included). The draft downloaded a pinned ZAP tarball, started it in daemon
+# mode, polled for readiness, and scraped the output file by hand -- roughly
+# 30 lines of shell that the official action does for you, and that silently
+# rots when the ZAP release URL changes.
+#
+# Other fixes:
+#   - actions/checkout v3 -> v7, upload-artifact v3 -> v7
+#     (upload-artifact v3 was shut down in early 2025 and now fails outright)
+#   - target URL is an input instead of a hardcoded mock endpoint
+#   - added a permissions block
+#
+# Baseline mode is passive: it spiders the target and reports what it sees
+# without attacking. Only ever point this at systems you are authorised to test.
+
+name: ZAP Baseline Scan
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: URL to scan (must be one you are authorised to test)
+        required: true
+
+permissions: {}
+
+jobs:
+  zap-baseline:
+    name: ZAP baseline scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
+        with:
+          target: ${{ inputs.target_url || vars.ZAP_TARGET_URL }}
+          # Set true to have ZAP file GitHub issues for findings.
+          allow_issue_writing: false
+          # Optional: a .zap/rules.tsv in your repo lets you downgrade or
+          # ignore specific rule IDs so known-accepted findings stop failing
+          # the build.
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a"
+
+      - name: Upload ZAP report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: zap-report
+          path: |
+            report_html.html
+            report_md.md
+            report_json.json
+          if-no-files-found: ignore
+          retention-days: 30

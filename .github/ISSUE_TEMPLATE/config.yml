@@ -1,0 +1,10 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or help getting started
+    url: https://github.com/iampopye/devops-workflows/discussions
+    about: >-
+      New to GitHub Actions? Ask here. Beginner questions are genuinely welcome
+      and there is no such thing as a question that is too basic.
+  - name: GitHub Actions documentation
+    url: https://docs.github.com/en/actions/using-workflows/reusing-workflows
+    about: Official reference for reusable workflows and workflow_call.

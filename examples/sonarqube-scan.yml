@@ -1,0 +1,71 @@
+# Minimal standalone SonarQube scan with an enforced quality gate.
+#
+# This is the smallest useful SonarQube workflow: check out the code, scan it,
+# and fail the build if the project's quality gate is red. Use it when you want
+# static analysis on a repo that has no coverage step to feed in yet. If you are
+# scanning Go and want coverage numbers in Sonar, use
+# `go-test-and-sonarqube.yml` instead -- it wires `coverage.out` into the scan.
+#
+# Modernised from the original `sonar-scan.txt` draft:
+#   - actions/checkout v2 -> v7. v2 runs on a Node runtime GitHub has already
+#     retired, so it warns today and will stop working outright.
+#   - sonarqube-scan-action pinned to a SHA instead of @master. `@master` is a
+#     mutable moving ref: you run whatever SonarSource pushes next, and it runs
+#     with SONAR_TOKEN in scope. A tag is barely better -- the author can
+#     repoint it. A 40-char commit SHA is the only ref that cannot change under
+#     you. Let Dependabot bump it on a schedule you control.
+#   - the quality gate step is enabled rather than commented out. This is the
+#     substantive fix. A scan with no gate uploads results and always exits 0:
+#     it is a dashboard, not a gate. Nothing in CI ever goes red, so nothing
+#     ever gets fixed.
+#   - added an explicit `permissions:` block. The draft had none, so it silently
+#     inherited the repository default -- historically read/write on everything.
+#   - `fetch-depth: 0` kept, and the reason spelled out below.
+
+name: SonarQube Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  sonarqube:
+    name: SonarQube scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # SonarQube reads git blame to attribute issues to authors and to work
+          # out what counts as "new code". A shallow clone has no history, so
+          # every line looks new and the new-code quality gate is meaningless.
+          fetch-depth: 0
+
+      - name: SonarQube scan
+        uses: sonarsource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          # Point this at your SonarQube server. Omit it entirely if you are on
+          # SonarQube Cloud, where the action already knows the endpoint.
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+
+      - name: SonarQube quality gate
+        # The draft had this commented out with a note saying to uncomment it
+        # "if you wish to fail your job". Treat that as the default, not the
+        # option: a gate you have to opt into is a gate nobody turns on.
+        #
+        # This step polls the server for the analysis result, so it needs a
+        # timeout -- otherwise a stuck analysis holds a runner for six hours.
+        uses: sonarsource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b # v1.2.0
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

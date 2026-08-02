@@ -1,70 +1,225 @@
 name: Reusable AI-Assisted PR Review
 
+# Posts an AI-generated review comment on a pull request.
+#
+# OPTIONAL AND VENDOR-NEUTRAL. Nothing else in this repo depends on it, and it
+# is not tied to any one AI provider. You choose the provider and the model --
+# there is no default model, so no vendor is implied.
+#
+# Built-in presets (no api_url needed):
+#   anthropic   -> api.anthropic.com
+#   openai      -> api.openai.com
+#   groq        -> api.groq.com
+#   openrouter  -> openrouter.ai      (one key, many models)
+#   together    -> api.together.xyz
+#   mistral     -> api.mistral.ai
+#   deepseek    -> api.deepseek.com
+#
+# Anything else:
+#   openai_compatible + api_url -> Ollama, vLLM, llama.cpp, LM Studio,
+#   Azure OpenAI, Fireworks, or a model on your own hardware with no third
+#   party involved at all.
+#
+# The review is advisory. It does not gate the merge and should not replace a
+# human reviewer.
+
 on:
   workflow_call:
     inputs:
+      provider:
+        description: >-
+          anthropic | openai | groq | openrouter | together | mistral |
+          deepseek | openai_compatible
+        required: true
+        type: string
       model:
+        description: Model identifier. Required -- no default, so no vendor is assumed.
+        required: true
+        type: string
+      api_url:
+        description: >-
+          Full endpoint URL. Required for openai_compatible. Optional for every
+          other provider, where it OVERRIDES that provider's built-in URL --
+          useful for a proxy, a gateway, or a regional endpoint. Leave empty to
+          use the built-in URL.
         required: false
         type: string
-        default: gpt-4o-mini
+        default: ""
+      system_prompt:
+        description: System prompt for the reviewer persona
+        required: false
+        type: string
+        default: >-
+          You are a senior DevSecOps reviewer. Focus on security, reliability
+          and maintainability. Be specific and concise. If you find nothing
+          material, say so plainly rather than inventing issues.
+      max_diff_bytes:
+        description: Truncate the diff to this many bytes before sending
+        required: false
+        type: number
+        default: 60000
+      max_tokens:
+        description: Maximum tokens in the model response
+        required: false
+        type: number
+        default: 2000
     secrets:
-      openai_api_key:
-        required: true
+      ai_api_key:
+        description: API key for the chosen provider. Omit for a local endpoint that needs no auth.
+        required: false
 
-permissions:
-  contents: read
-  pull-requests: write
+permissions: {}
 
 jobs:
   ai-pr-review:
-    if: github.event_name == 'pull_request'
+    name: AI PR review
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Build PR diff
-        id: diff
-        run: |
-          gh pr diff ${{ github.event.pull_request.number }} > pr.diff
-          {
-            echo "diff<<EOF"
-            sed -n '1,400p' pr.diff
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+      - name: Capture PR diff
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MAX_BYTES: ${{ inputs.max_diff_bytes }}
+        run: |
+          set -euo pipefail
+          # Write to a file rather than $GITHUB_OUTPUT. A heredoc delimiter in
+          # $GITHUB_OUTPUT can be forged by a diff line that is literally "EOF",
+          # which lets PR content inject arbitrary step outputs. Step outputs
+          # also cap at 1 MB. A file has neither problem.
+          gh pr diff "${PR_NUMBER}" > pr.diff
+          head -c "${MAX_BYTES}" pr.diff > pr.diff.trunc
+          if [ "$(wc -c < pr.diff)" -gt "${MAX_BYTES}" ]; then
+            printf '\n\n[diff truncated at %s bytes]\n' "${MAX_BYTES}" >> pr.diff.trunc
+          fi
+          mv pr.diff.trunc pr.diff
+          echo "Diff size: $(wc -c < pr.diff) bytes"
 
-      - name: AI review comment
-        uses: actions/github-script@v7
+      - name: Request review and comment
+        uses: actions/github-script@v9
         env:
-          OPENAI_API_KEY: ${{ secrets.openai_api_key }}
+          AI_API_KEY: ${{ secrets.ai_api_key }}
+          PROVIDER: ${{ inputs.provider }}
           MODEL: ${{ inputs.model }}
-          DIFF_TEXT: ${{ steps.diff.outputs.diff }}
+          API_URL: ${{ inputs.api_url }}
+          SYSTEM_PROMPT: ${{ inputs.system_prompt }}
+          MAX_TOKENS: ${{ inputs.max_tokens }}
         with:
           github-token: ${{ github.token }}
           script: |
-            const prompt = `Review this pull request diff with focus on security, reliability, and maintainability. Provide concise findings and actionable suggestions:\n\n${process.env.DIFF_TEXT}`;
-            const res = await fetch('https://api.openai.com/v1/chat/completions', {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                model: process.env.MODEL,
-                messages: [
-                  { role: 'system', content: 'You are a senior DevSecOps reviewer.' },
-                  { role: 'user', content: prompt }
-                ],
-                temperature: 0.2
-              })
-            });
-            const data = await res.json();
-            const review = data.choices?.[0]?.message?.content || 'AI review unavailable.';
+            const fs = require('fs');
+            const diff = fs.readFileSync('pr.diff', 'utf8');
+            if (!diff.trim()) {
+              core.info('Empty diff; nothing to review.');
+              return;
+            }
+
+            const provider = process.env.PROVIDER;
+            const model = process.env.MODEL;
+            const key = process.env.AI_API_KEY || '';
+            const system = process.env.SYSTEM_PROMPT;
+            const maxTokens = Number(process.env.MAX_TOKENS);
+            const userPrompt =
+              'Review this pull request diff. Report concrete findings with ' +
+              'actionable suggestions.\n\n' + diff;
+
+            // --- Provider adapters -------------------------------------------
+            // Most vendors speak the OpenAI chat/completions shape, so they
+            // differ only by base URL. Add a row to extend; add a full adapter
+            // below if a vendor uses a different request/response shape.
+            const OPENAI_SHAPED = {
+              openai:     { url: 'https://api.openai.com/v1/chat/completions', newTokenField: true },
+              groq:       { url: 'https://api.groq.com/openai/v1/chat/completions' },
+              openrouter: { url: 'https://openrouter.ai/api/v1/chat/completions' },
+              together:   { url: 'https://api.together.xyz/v1/chat/completions' },
+              mistral:    { url: 'https://api.mistral.ai/v1/chat/completions' },
+              deepseek:   { url: 'https://api.deepseek.com/chat/completions' },
+              // Bring your own endpoint: Ollama, vLLM, llama.cpp, LM Studio,
+              // Azure OpenAI, Fireworks, or anything else OpenAI-shaped.
+              openai_compatible: { url: null },
+            };
+
+            const adapters = {};
+            for (const [name, cfg] of Object.entries(OPENAI_SHAPED)) {
+              adapters[name] = {
+                url: process.env.API_URL || cfg.url,
+                headers: () => (key ? { Authorization: `Bearer ${key}` } : {}),
+                body: () => ({
+                  model,
+                  // OpenAI renamed this field; the others still take max_tokens.
+                  ...(cfg.newTokenField
+                    ? { max_completion_tokens: maxTokens }
+                    : { max_tokens: maxTokens }),
+                  messages: [
+                    { role: 'system', content: system },
+                    { role: 'user', content: userPrompt },
+                  ],
+                }),
+                parse: (d) => d.choices?.[0]?.message?.content,
+              };
+            }
+
+            // Anthropic uses a different shape: system is a top-level field and
+            // the response is a content-block array rather than choices[].
+            adapters.anthropic = {
+              url: process.env.API_URL || 'https://api.anthropic.com/v1/messages',
+              headers: () => ({ 'x-api-key': key, 'anthropic-version': '2023-06-01' }),
+              body: () => ({
+                model,
+                max_tokens: maxTokens,
+                system,
+                messages: [{ role: 'user', content: userPrompt }],
+              }),
+              parse: (d) => d.content?.find((b) => b.type === 'text')?.text,
+            };
+
+            const adapter = adapters[provider];
+            if (!adapter) {
+              core.setFailed(
+                `Unknown provider "${provider}". Expected one of: ${Object.keys(adapters).join(', ')}`
+              );
+              return;
+            }
+            if (!adapter.url) {
+              core.setFailed(`provider "${provider}" requires the api_url input.`);
+              return;
+            }
+
+            let review;
+            try {
+              const res = await fetch(adapter.url, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', ...adapter.headers() },
+                body: JSON.stringify(adapter.body()),
+              });
+              if (!res.ok) {
+                // Body may contain an echoed key; log status only.
+                throw new Error(`${provider} returned HTTP ${res.status} ${res.statusText}`);
+              }
+              review = adapter.parse(await res.json());
+            } catch (err) {
+              // A flaky model endpoint should not fail the PR check.
+              core.warning(`AI review unavailable: ${err.message}`);
+              return;
+            }
+
+            if (!review) {
+              core.warning('Provider returned no usable text; skipping comment.');
+              return;
+            }
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `## 🤖 AI PR Review\n\n${review}`,
+              body:
+                `## 🤖 AI PR Review\n\n${review}\n\n---\n` +
+                `<sub>Advisory only — not a substitute for human review. ` +
+                `Model: \`${model}\` via \`${provider}\`.</sub>`,
             });

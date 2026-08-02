@@ -1,0 +1,15 @@
+# Normalise line endings so a Windows contributor does not produce a diff that
+# touches every line of a file.
+* text=auto eol=lf
+
+# Shell scripts and YAML must be LF regardless of platform -- CRLF breaks
+# shebangs and confuses YAML parsers.
+*.sh   text eol=lf
+*.bash text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Keep these out of the language stats so GitHub reports this as a YAML repo,
+# which is what it actually is.
+docs/*.html linguist-documentation
+examples/*.yml linguist-documentation=false

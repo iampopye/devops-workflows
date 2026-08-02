@@ -1,0 +1,329 @@
+# GKE-hosted SonarQube scan, followed by Go unit tests against Cloud SQL.
+#
+# The shape of this pipeline: SonarQube is run inside a GKE cluster as a
+# StatefulSet that is normally scaled to zero to save money. CI scales it up,
+# waits for it to actually finish booting, scans, enforces the quality gate,
+# then opens a Cloud SQL Proxy tunnel and runs the Go test suite against a real
+# Postgres instance.
+#
+# Modernised from the original `SonarQube and Unit Testing.txt` draft:
+#
+#   - Workload Identity Federation replaces `credentials_json`. The draft
+#     shipped a long-lived service-account JSON key in a repo secret. That key
+#     never expires, works from anywhere on the internet, and is readable by
+#     anyone who can add a workflow to this repo. WIF instead exchanges the
+#     job's short-lived GitHub OIDC token for a Google access token that lasts
+#     an hour and is bound to this repository. There is no key to leak, rotate,
+#     or find in a Slack thread three years from now. It needs
+#     `permissions: id-token: write` to mint the OIDC token -- see below.
+#   - added a `permissions:` block. The draft had none, so every job inherited
+#     the repository default token scope.
+#   - actions/setup-java v3 -> v5 (v3 is on a retired Node runtime).
+#   - the manual `kubectl` + `gke-gcloud-auth-plugin` curl installs are gone.
+#     The draft downloaded kubectl from `stable.txt` -- an unpinned moving
+#     target -- and pulled the auth plugin from a *staging* GCS bucket that was
+#     never meant to be a distribution channel. Replaced with
+#     `google-github-actions/setup-gcloud` (which installs the auth plugin as a
+#     proper gcloud component) and `azure/setup-kubectl` (which pins a kubectl
+#     version you choose).
+#   - the readiness `while true` loop now has a bound. The original could not
+#     exit: if the pod never reached Running, the loop span forever and the job
+#     burned a runner until GitHub's 6-hour limit killed it. Every wait in CI
+#     needs a maximum.
+#   - readiness now checks for `"status":"UP"`, not just HTTP 200. SonarQube
+#     answers 200 with `"status":"STARTING"` for a minute or two while it boots,
+#     so the draft's check passed against a server that could not yet scan.
+#   - Cloud SQL Proxy v1 (`cloud_sql_proxy.linux.amd64`) -> v2. v1 reached end
+#     of life and no longer receives security fixes. The binary is also checksum
+#     -verified now instead of being piped straight onto the PATH.
+#   - the manual SonarScanner CLI unzip is deleted. The draft hardcoded
+#     4.8.0.2856, unzipped it into /opt, symlinked it -- and then ran the
+#     official scan action anyway, which brings its own scanner. The manual
+#     install was dead weight that only served to pin a stale analyser.
+#   - `go mod init` removed. Initialising a module inside CI is a repo-setup
+#     step that ran on every push; if it ever actually fired it meant the repo
+#     was missing its go.mod, and the run should fail loudly rather than paper
+#     over it. Go version now comes from go.mod via setup-go.
+#   - the tests connect to 127.0.0.1, not `secrets.POSTGRES_HOST`. That is the
+#     entire point of the proxy -- see the comment on the test step.
+#   - added a `concurrency` group. Two runs scaling the same shared StatefulSet
+#     at once is a genuine race.
+#   - hardcoded SonarQube hostname replaced with a repo variable.
+#
+# One-time setup this workflow assumes:
+#   - a Workload Identity Pool + Provider trusting this repo, and a service
+#     account with container.developer + cloudsql.client, impersonatable by it
+#   - repo variables: GCP_PROJECT_ID, GCP_WORKLOAD_IDENTITY_PROVIDER,
+#     GCP_SERVICE_ACCOUNT, GKE_CLUSTER, GKE_LOCATION, CLOUD_SQL_INSTANCE,
+#     SONAR_HOST_URL, SONAR_PROJECT_KEY
+#   - repo secrets: SONARQUBE_TOKEN, POSTGRES_DB, POSTGRES_USER,
+#     POSTGRES_PASSWORD
+
+name: GKE SonarQube and Unit Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+# The SonarQube StatefulSet is shared cluster state. Serialise runs so two jobs
+# cannot scale it up and down underneath each other. `cancel-in-progress: false`
+# because cancelling mid-run would skip the cleanup step and leave the Cloud SQL
+# Proxy running on a runner that is about to be recycled anyway -- but more
+# importantly, an interrupted scan leaves a half-written analysis on the server.
+concurrency:
+  group: gke-sonarqube
+  cancel-in-progress: false
+
+jobs:
+  sonar-scan:
+    name: SonarQube scan and Go tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # Required by Workload Identity Federation: this is what lets the job ask
+      # GitHub for an OIDC token to trade with Google. Without it, the auth step
+      # fails with "unable to get ACTIONS_ID_TOKEN_REQUEST_URL".
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # SonarQube needs history for blame and new-code detection.
+          fetch-depth: 0
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          # Neither of these is secret material -- the provider is a resource
+          # path and the service account is an email address. That is the whole
+          # improvement: there is no credential in this workflow to steal. They
+          # live in `vars` rather than `secrets` to make that obvious.
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          # Legacy fallback, kept commented for reference only. Prefer WIF:
+          # a JSON key is a bearer credential with no expiry, no binding to the
+          # caller, and no revocation story short of deleting the key and
+          # hunting down everywhere it was copied. Use this only if you are on
+          # a platform that cannot issue OIDC tokens.
+          #
+          # credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          # This is the supported way to get the GKE auth plugin. The draft
+          # curl'd it out of a Kubernetes *staging* bucket.
+          install_components: gke-gcloud-auth-plugin
+          # Note: the draft also passed `export_default_credentials: true`.
+          # That input was removed in setup-gcloud v1 -- the auth step above
+          # already exports credentials for every later step in the job.
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+        with:
+          # Pin a version. The draft resolved `stable.txt` at runtime, so the
+          # same commit could get a different kubectl tomorrow -- and kubectl
+          # only supports one minor version of skew from the cluster.
+          version: v1.31.0
+
+      - name: Get GKE credentials
+        env:
+          GKE_CLUSTER: ${{ vars.GKE_CLUSTER }}
+          # `--location` covers both zonal and regional clusters; the draft's
+          # `--zone` breaks the moment someone moves to a regional cluster.
+          GKE_LOCATION: ${{ vars.GKE_LOCATION }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE || 'cicd' }}
+        run: |
+          set -euo pipefail
+          gcloud container clusters get-credentials "${GKE_CLUSTER}" \
+            --location "${GKE_LOCATION}" \
+            --project "${GCP_PROJECT_ID}"
+          kubectl version --client
+          kubectl get pods -n "${K8S_NAMESPACE}"
+
+      - name: Scale up the SonarQube StatefulSet
+        env:
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE || 'cicd' }}
+        run: |
+          set -euo pipefail
+          kubectl scale statefulset sonarqube-sonarqube \
+            --replicas=1 -n "${K8S_NAMESPACE}"
+
+      - name: Wait for the SonarQube pod to roll out
+        # `rollout status` is the built-in bounded wait -- it blocks until the
+        # StatefulSet reports ready or the timeout fires, and it exits non-zero
+        # on failure. It replaces the draft's hand-rolled jsonpath poll, which
+        # also had a subtle bug: it only ever inspected `.items[0]`, so during a
+        # rolling update it could report on a pod that was on its way out.
+        timeout-minutes: 10
+        env:
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE || 'cicd' }}
+        run: |
+          set -euo pipefail
+          kubectl rollout status statefulset/sonarqube-sonarqube \
+            -n "${K8S_NAMESPACE}" --timeout=9m
+
+      - name: Wait for the SonarQube API to report UP
+        # A ready pod is not a ready SonarQube. The server accepts connections
+        # and answers 200 while it is still migrating its database and starting
+        # Elasticsearch, reporting `"status":"STARTING"`. Scanning against that
+        # fails in confusing ways, so wait for UP specifically.
+        #
+        # Bounded: 30 attempts x 10s = 5 minutes, then fail. The draft's
+        # equivalent could never fail, only hang.
+        timeout-minutes: 6
+        env:
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+        run: |
+          set -euo pipefail
+          attempts=30
+          delay=10
+          for i in $(seq 1 "${attempts}"); do
+            status="$(curl -fsS --max-time 10 "${SONAR_HOST_URL}/api/system/status" \
+              | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([A-Z]*\)".*/\1/p' || true)"
+            if [ "${status}" = "UP" ]; then
+              echo "SonarQube reported UP after ${i} attempt(s)."
+              exit 0
+            fi
+            echo "Attempt ${i}/${attempts}: status=${status:-unreachable}. Retrying in ${delay}s."
+            sleep "${delay}"
+          done
+          echo "::error::SonarQube did not report UP within $((attempts * delay))s."
+          exit 1
+
+      - name: Set up Java
+        # v3 -> v5. The scan action ships its own JRE for the common case, so
+        # this is only strictly required if your analysis also runs JVM-based
+        # plugins or your build is JVM-based. Kept because the draft relied on
+        # it and removing it would be a behaviour change, not a modernisation.
+        uses: actions/setup-java@v5
+        with:
+          java-version: "17"
+          distribution: temurin
+
+      - name: SonarQube scan
+        # The draft manually unzipped sonar-scanner-cli 4.8.0.2856 into /opt and
+        # symlinked it, then ran this action -- which downloads and manages its
+        # own scanner. The manual install did nothing except guarantee a stale
+        # analyser was sitting on the PATH.
+        uses: sonarsource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+
+      - name: SonarQube quality gate
+        # Replaces the draft's `run: echo "SonarQube analysis passed."`, which
+        # printed a reassuring message whether or not anything had passed. This
+        # step actually asks the server for the gate result and fails the job if
+        # it is red.
+        uses: sonarsource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b # v1.2.0
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # Read from go.mod. The draft ran `go mod init ... || echo "Module
+          # already initialized."` on every push -- if that ever succeeded, the
+          # repo had no go.mod and the tests were running against a module
+          # invented on the spot.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download Go dependencies
+        run: go mod download
+
+      - name: Start Cloud SQL Proxy
+        env:
+          # v1 is EOL and unsupported. v2 changed the binary name
+          # (cloud-sql-proxy, hyphens) and the flag style (--port instead of
+          # -instances=...=tcp:5432).
+          PROXY_VERSION: v2.24.1
+          CLOUD_SQL_INSTANCE: ${{ vars.CLOUD_SQL_INSTANCE }}
+        run: |
+          set -euo pipefail
+          base="https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${PROXY_VERSION}"
+          curl -fsSLo cloud-sql-proxy "${base}/cloud-sql-proxy.linux.amd64"
+          curl -fsSLo cloud-sql-proxy.sha256 "${base}/cloud-sql-proxy.linux.amd64.sha256"
+          # Verify before executing. The draft chmod +x'd whatever came back
+          # from the network and ran it against production credentials.
+          echo "$(cut -d' ' -f1 cloud-sql-proxy.sha256)  cloud-sql-proxy" | sha256sum -c -
+          chmod +x cloud-sql-proxy
+
+          # The proxy authenticates with the WIF credentials exported earlier.
+          # --health-check gives us something deterministic to wait on instead
+          # of the draft's `sleep 5` guess.
+          nohup ./cloud-sql-proxy \
+            --port 5432 \
+            --health-check \
+            --http-address 127.0.0.1 \
+            "${CLOUD_SQL_INSTANCE}" > cloud-sql-proxy.log 2>&1 &
+          echo "$!" > cloud-sql-proxy.pid
+
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 5 http://127.0.0.1:9090/startup > /dev/null 2>&1; then
+              echo "Cloud SQL Proxy ready after ${i} attempt(s)."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Cloud SQL Proxy did not become ready within 60s."
+          cat cloud-sql-proxy.log
+          exit 1
+
+      - name: Run unit tests
+        env:
+          # The proxy listens on localhost and forwards to Cloud SQL over a
+          # mutually authenticated tunnel. The draft passed a POSTGRES_HOST
+          # secret here, which either bypassed the proxy entirely (exposing the
+          # database to the public internet) or pointed at a host that was not
+          # listening. If you are running the proxy, you connect to 127.0.0.1.
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: "5432"
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          set -euo pipefail
+          go test ./... -v -race -coverprofile=coverage.out -covermode=atomic
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stop Cloud SQL Proxy
+        if: always()
+        # `pkill cloud_sql_proxy` in the draft matched on name and would have
+        # killed any process with that string. Kill the PID we actually started.
+        run: |
+          set -euo pipefail
+          if [ -f cloud-sql-proxy.pid ]; then
+            kill "$(cat cloud-sql-proxy.pid)" 2>/dev/null || true
+          fi
+
+# ---------------------------------------------------------------------------
+# Deliberately NOT included: a step that scales the StatefulSet back to zero.
+#
+# It is tempting -- that is why it is scaled up in the first place. But a
+# scale-down in this job would fight with anyone using SonarQube's UI, and a
+# cancelled run skips it and leaves the cluster paying for an idle replica
+# anyway. Scale-down belongs on a scheduled workflow (or a KEDA cron
+# ScaledObject) that runs once at the end of the day, where it is idempotent
+# and cannot race with a scan.
+# ---------------------------------------------------------------------------

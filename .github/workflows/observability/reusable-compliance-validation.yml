@@ -1,61 +1,120 @@
-name: Reusable Compliance Validation (HIPAA/GDPR)
+name: Reusable Compliance Validation
+
+# IaC misconfiguration scanning plus policy-as-code validation.
+#
+# This produces evidence, not a compliance certificate. Passing it does not make
+# a system HIPAA or GDPR compliant -- it checks a technical baseline that
+# supports some of the controls those frameworks require. Mapping controls to
+# your actual architecture is work only your organisation can do.
 
 on:
   workflow_call:
     inputs:
       policy_path:
+        description: Directory containing OPA Rego policies
         required: false
         type: string
         default: policy/
       trivy_severity:
+        description: Severities to report on
         required: false
         type: string
-        default: HIGH,CRITICAL
+        default: CRITICAL,HIGH
+      fail_on_findings:
+        description: Fail the job when misconfigurations are found
+        required: false
+        type: boolean
+        default: true
 
-permissions:
-  contents: read
-  security-events: write
+permissions: {}
 
 jobs:
   compliance-validation:
+    name: Compliance validation
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Run Trivy config scan for IaC misconfig
-        uses: aquasecurity/trivy-action@0.24.0
+      - name: Trivy IaC misconfiguration scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           scan-ref: .
           format: sarif
           output: trivy-config.sarif
           severity: ${{ inputs.trivy_severity }}
-          exit-code: 1
+          # Never fail here -- that would skip the SARIF upload and every OPA
+          # check below. The gate is a dedicated step at the end.
+          exit-code: 0
 
-      - name: Upload config SARIF
+      - name: Upload IaC SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-config.sarif
+          category: trivy-config
 
-      - name: Validate OPA policies
-        uses: open-policy-agent/setup-opa@v2
+      - name: Setup OPA
+        uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
 
       - name: Run policy checks
+        id: opa
+        env:
+          POLICY_PATH: ${{ inputs.policy_path }}
         run: |
-          if [ -d "${{ inputs.policy_path }}" ]; then
-            opa test "${{ inputs.policy_path }}" -v
-          else
-            echo "No policy directory found at ${{ inputs.policy_path }}; skipping OPA tests."
+          set -euo pipefail
+          if [ ! -d "${POLICY_PATH}" ]; then
+            echo "::warning::No policy directory at '${POLICY_PATH}'. Skipping OPA tests."
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          if ! find "${POLICY_PATH}" -name '*.rego' -print -quit | grep -q .; then
+            echo "::warning::'${POLICY_PATH}' exists but contains no .rego files. Skipping OPA tests."
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ran=true" >> "$GITHUB_OUTPUT"
+          opa test "${POLICY_PATH}" -v
 
-      - name: Compliance checklist summary
+      - name: Compliance summary
+        if: always()
+        env:
+          OPA_RAN: ${{ steps.opa.outputs.ran }}
+          POLICY_PATH: ${{ inputs.policy_path }}
         run: |
+          set -euo pipefail
+          count=0
+          if [ -f trivy-config.sarif ]; then
+            count="$(jq '[.runs[].results[]?] | length' trivy-config.sarif)"
+          fi
           {
-            echo "## Compliance coverage (baseline)"
-            echo "- ✅ Vulnerability and IaC misconfiguration scanning"
-            echo "- ✅ Secret detection (recommend paired security workflow)"
-            echo "- ✅ Policy-as-code validation support"
-            echo "- ℹ️ Map controls to HIPAA Security Rule and GDPR Article 32 in your org docs"
+            echo "## Compliance validation (technical baseline)"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| IaC misconfiguration scan | ${count} finding(s) at ${{ inputs.trivy_severity }} |"
+            if [ "${OPA_RAN}" = "true" ]; then
+              echo "| Policy-as-code (OPA) | ran against \`${POLICY_PATH}\` |"
+            else
+              echo "| Policy-as-code (OPA) | skipped — no policies at \`${POLICY_PATH}\` |"
+            fi
+            echo "| Secret detection | not covered here — pair with the security workflow |"
+            echo ""
+            echo "> This is evidence toward a control set, not a compliance attestation."
+            echo "> Map these results to HIPAA Security Rule / GDPR Art. 32 controls in your own docs."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gate on misconfigurations
+        if: ${{ always() && inputs.fail_on_findings }}
+        run: |
+          set -euo pipefail
+          [ -f trivy-config.sarif ] || exit 0
+          count="$(jq '[.runs[].results[]?] | length' trivy-config.sarif)"
+          if [ "${count}" -gt 0 ]; then
+            echo "::error::${count} IaC misconfiguration(s) at or above ${{ inputs.trivy_severity }}."
+            exit 1
+          fi

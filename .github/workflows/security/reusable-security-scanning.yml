@@ -1,20 +1,39 @@
 name: Reusable DevSecOps Security Scanning
 
+# SAST + dependency/IaC scanning + secret detection, with optional DAST.
+#
+# Third-party actions are pinned to a full commit SHA. A Git tag is mutable --
+# whoever controls the action repo can repoint v1 at new code, and your pipeline
+# runs it with your secrets on the next push. A SHA cannot be repointed.
+# The trailing comment is the human-readable version; Dependabot updates both.
+
 on:
   workflow_call:
     inputs:
       language:
-        description: Primary language for CodeQL
+        description: >-
+          Primary language for CodeQL: go, javascript-typescript, python,
+          java-kotlin, ruby, csharp, c-cpp, swift, rust, actions
         required: false
         type: string
         default: go
-      fail_on_trivy_severity:
-        description: Comma separated severities to fail build on
+      run_codeql:
+        description: Run the CodeQL SAST job. Disable for languages CodeQL does not support.
+        required: false
+        type: boolean
+        default: true
+      trivy_severity:
+        description: Comma separated severities to report on
         required: false
         type: string
         default: CRITICAL,HIGH
+      fail_on_findings:
+        description: Fail the job when Trivy finds issues at or above trivy_severity
+        required: false
+        type: boolean
+        default: true
       zap_target_url:
-        description: Optional target URL for baseline DAST scan
+        description: Optional target URL for a baseline DAST scan. Leave empty to skip.
         required: false
         type: string
         default: ""
@@ -22,18 +41,22 @@ on:
       github_token:
         required: false
 
-permissions:
-  contents: read
-  security-events: write
-  actions: read
+# Deny by default, then grant the minimum each job needs. A workflow-level
+# grant would hand every job the union of all permissions.
+permissions: {}
 
 jobs:
   codeql:
     name: CodeQL SAST
+    if: ${{ inputs.run_codeql }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
@@ -54,40 +77,66 @@ jobs:
       security-events: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          # Gitleaks scans commit history, which a shallow clone does not have.
+          fetch-depth: 0
 
-      - name: Trivy FS scan (SARIF)
-        uses: aquasecurity/trivy-action@0.24.0
+      - name: Trivy filesystem scan (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
           format: sarif
           output: trivy-results.sarif
-          severity: ${{ inputs.fail_on_trivy_severity }}
+          severity: ${{ inputs.trivy_severity }}
           ignore-unfixed: true
-          exit-code: 1
+          # Deliberately 0. Failing here would skip both the SARIF upload and
+          # the secret scan below, so one dependency CVE could silently hide a
+          # leaked credential. The gate is a dedicated step at the end.
+          exit-code: 0
 
       - name: Upload Trivy SARIF
-        uses: github/codeql-action/upload-sarif@v3
         if: always()
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
+          category: trivy-fs
 
       - name: Gitleaks secret scan
-        uses: gitleaks/gitleaks-action@v2
+        if: always()
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.github_token || github.token }}
+
+      - name: Gate on Trivy findings
+        if: ${{ always() && inputs.fail_on_findings }}
+        env:
+          SEVERITY: ${{ inputs.trivy_severity }}
+        run: |
+          set -euo pipefail
+          if [ ! -f trivy-results.sarif ]; then
+            echo "::warning::No Trivy SARIF produced; nothing to gate on."
+            exit 0
+          fi
+          count="$(jq '[.runs[].results[]?] | length' trivy-results.sarif)"
+          echo "Trivy reported ${count} finding(s) at severity: ${SEVERITY}"
+          if [ "${count}" -gt 0 ]; then
+            echo "::error::Trivy found ${count} issue(s) at or above ${SEVERITY}. See the Security tab."
+            exit 1
+          fi
 
   dast-zap-baseline:
     name: DAST baseline (optional)
     runs-on: ubuntu-latest
     if: ${{ inputs.zap_target_url != '' }}
     permissions:
+      # No issues:write -- allow_issue_writing is false below, so the grant
+      # would be unused. Least privilege means not granting "just in case".
       contents: read
-      security-events: write
     steps:
       - name: Baseline ZAP scan
-        uses: zaproxy/action-baseline@v0.12.0
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
         with:
           target: ${{ inputs.zap_target_url }}
           allow_issue_writing: false

@@ -1,5 +1,9 @@
 name: Reusable Terraform Infrastructure Automation
 
+# fmt -> init -> validate -> plan, with an optional gated apply.
+# Third-party actions are SHA-pinned; see security/reusable-security-scanning.yml
+# for the reasoning.
+
 on:
   workflow_call:
     inputs:
@@ -12,14 +16,14 @@ on:
         description: Terraform version to use
         required: false
         type: string
-        default: 1.9.8
+        default: 1.14.3
       apply:
-        description: Apply terraform plan (true/false)
+        description: Apply the plan after it succeeds (true/false)
         required: false
         type: boolean
         default: false
       environment:
-        description: GitHub environment name
+        description: GitHub environment name. Use its protection rules to gate apply.
         required: false
         type: string
         default: nonprod
@@ -27,59 +31,122 @@ on:
       tf_api_token:
         required: false
 
-permissions:
-  contents: read
-  id-token: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   terraform:
     name: Terraform fmt, validate, plan/apply
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      # For OIDC federation to AWS/GCP/Azure. Prefer short-lived OIDC tokens
+      # over long-lived cloud keys pasted into repo secrets.
+      id-token: write
+      pull-requests: write
     defaults:
       run:
         shell: bash
         working-directory: ${{ inputs.working_directory }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ inputs.terraform_version }}
           cli_config_credentials_token: ${{ secrets.tf_api_token }}
 
       - name: Terraform fmt check
+        id: fmt
+        continue-on-error: true
         run: terraform fmt -check -recursive
 
       - name: Terraform init
+        id: init
         run: terraform init -input=false
 
       - name: Terraform validate
+        id: validate
         run: terraform validate -no-color
 
       - name: Terraform plan
         id: plan
-        run: terraform plan -input=false -no-color -out=tfplan
+        # Without continue-on-error, a failed plan aborts the job and the PR
+        # comment below never runs -- so the comment could only ever report
+        # "success". That was a real bug in the previous version of this file.
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          terraform plan -input=false -no-color -out=tfplan 2>&1 | tee plan.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Terraform plan summary
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+      - name: Comment plan on PR
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        uses: actions/github-script@v9
+        env:
+          FMT: ${{ steps.fmt.outcome }}
+          INIT: ${{ steps.init.outcome }}
+          VALIDATE: ${{ steps.validate.outcome }}
+          PLAN: ${{ steps.plan.outcome }}
+          WORKDIR: ${{ inputs.working_directory }}
         with:
           github-token: ${{ github.token }}
           script: |
             const fs = require('fs');
-            const output = `${{ steps.plan.outcome }}`;
-            const body = `### Terraform plan status\n\nResult: **${output}**\n\nWorkflow: \`${context.workflow}\``;
-            github.rest.issues.createComment({
+            let plan = '';
+            try {
+              plan = fs.readFileSync(`${process.env.WORKDIR}/plan.txt`, 'utf8');
+            } catch {
+              plan = '(no plan output produced)';
+            }
+            // A GitHub comment body caps at 65536 chars. Keep the tail, which
+            // holds the resource summary and any error message.
+            const MAX = 60000;
+            if (plan.length > MAX) {
+              plan = `...(truncated ${plan.length - MAX} chars)...\n` + plan.slice(-MAX);
+            }
+            const icon = (o) => (o === 'success' ? '✅' : o === 'skipped' ? '⏭️' : '❌');
+            const body = [
+              '### Terraform',
+              '',
+              '| Step | Result |',
+              '| --- | --- |',
+              `| Format | ${icon(process.env.FMT)} \`${process.env.FMT}\` |`,
+              `| Init | ${icon(process.env.INIT)} \`${process.env.INIT}\` |`,
+              `| Validate | ${icon(process.env.VALIDATE)} \`${process.env.VALIDATE}\` |`,
+              `| Plan | ${icon(process.env.PLAN)} \`${process.env.PLAN}\` |`,
+              '',
+              '<details><summary>Show plan</summary>',
+              '',
+              '```terraform',
+              plan,
+              '```',
+              '',
+              '</details>',
+              '',
+              `_Directory: \`${process.env.WORKDIR}\` · Workflow: \`${context.workflow}\`_`,
+            ].join('\n');
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body,
             });
 
+      - name: Fail if plan failed
+        if: ${{ steps.plan.outputs.exitcode != '0' }}
+        run: |
+          echo "::error::terraform plan failed (exit ${{ steps.plan.outputs.exitcode }})"
+          exit 1
+
+      - name: Fail if formatting is wrong
+        if: ${{ steps.fmt.outcome == 'failure' }}
+        run: |
+          echo "::error::terraform fmt check failed. Run 'terraform fmt -recursive' locally."
+          exit 1
+
       - name: Terraform apply
-        if: inputs.apply
+        if: ${{ inputs.apply }}
         run: terraform apply -input=false -auto-approve tfplan

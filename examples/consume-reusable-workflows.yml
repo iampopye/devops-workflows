@@ -1,0 +1,76 @@
+# Copy this into `.github/workflows/` in YOUR repo and edit.
+#
+# This is the main entry point: it shows how to call the reusable workflows in
+# this repo. Delete the jobs you don't need -- none of them depend on each
+# other except where `needs:` says so.
+#
+# Pin to a tag (@v1) rather than @main so an upstream change cannot alter your
+# pipeline without you choosing it.
+
+name: Platform CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  security:
+    uses: iampopye/devops-workflows/.github/workflows/security/reusable-security-scanning.yml@v1
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    with:
+      language: go
+      trivy_severity: CRITICAL,HIGH
+      # Leave empty to skip the DAST scan; set a URL for a deployed environment.
+      zap_target_url: ""
+
+  compliance:
+    uses: iampopye/devops-workflows/.github/workflows/observability/reusable-compliance-validation.yml@v1
+    permissions:
+      contents: read
+      security-events: write
+    with:
+      policy_path: policy/
+
+  terraform-plan:
+    uses: iampopye/devops-workflows/.github/workflows/terraform/reusable-terraform-infra.yml@v1
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    with:
+      working_directory: terraform
+      environment: nonprod
+      apply: false
+
+  docker-build:
+    uses: iampopye/devops-workflows/.github/workflows/docker/reusable-docker-build.yml@v1
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    with:
+      image_name: ghcr.io/${{ github.repository }}
+      platforms: linux/amd64,linux/arm64
+      # Only push from the default branch; PR builds stay local.
+      push: ${{ github.ref == 'refs/heads/main' }}
+
+  deploy:
+    # Only deploy once the image exists and security has passed.
+    needs: [docker-build, security]
+    if: github.ref == 'refs/heads/main'
+    uses: iampopye/devops-workflows/.github/workflows/kubernetes/reusable-kubernetes-deploy.yml@v1
+    permissions:
+      contents: read
+    with:
+      namespace: production
+      manifests_path: k8s/
+      environment: production
+      dry_run: false
+    secrets:
+      kubeconfig: ${{ secrets.KUBECONFIG_B64 }}

@@ -1,0 +1,21 @@
+version: 2
+
+# Dependabot understands SHA-pinned actions: it bumps both the SHA and the
+# trailing `# vX.Y.Z` comment together. Pinning does not mean going stale.
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      # One PR per week for routine bumps instead of six.
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch

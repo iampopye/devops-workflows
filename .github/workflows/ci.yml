@@ -1,0 +1,84 @@
+name: CI
+
+# This repo validates its own workflows. A collection of "best practice"
+# workflows that is never itself linted is just a collection of untested YAML.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  actionlint:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint --version
+
+      - name: Run actionlint
+        run: |
+          set -euo pipefail
+          # Note: a comment whose first word is the name of the shell linter is
+          # itself parsed as a linter directive, so that word is avoided here.
+          # actionlint shells out to it automatically to check every `run:` block.
+          ./actionlint -color \
+            .github/workflows/*.yml \
+            .github/workflows/*/*.yml \
+            examples/*.yml
+
+  pin-check:
+    name: Verify third-party actions are SHA-pinned
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Check pins
+        run: |
+          set -euo pipefail
+          # Third-party actions must be pinned to a 40-char commit SHA. Tags are
+          # mutable: the action author can repoint v1 at new code and your
+          # pipeline runs it with your secrets on the next push.
+          #
+          # Exempt:
+          #   actions/*, github/*  - first-party GitHub, major tags are their
+          #                          own documented guidance
+          #   ./*                  - local composite actions
+          #   iampopye/devops-workflows/*
+          #                        - self-references in examples/. These are
+          #                          reusable *workflows*, not actions, and they
+          #                          point at this same repo, so there is no
+          #                          third party to pin against.
+          fail=0
+          while IFS= read -r line; do
+            file="${line%%:*}"
+            ref="$(printf '%s' "$line" | sed -E 's/.*uses:[[:space:]]*//; s/[[:space:]]*(#.*)?$//')"
+            case "$ref" in
+              actions/*|github/*|./*|iampopye/devops-workflows/*) continue ;;
+            esac
+            if ! printf '%s' "$ref" | grep -qE '@[0-9a-f]{40}$'; then
+              echo "::error file=${file}::Not SHA-pinned: ${ref}"
+              fail=1
+            fi
+          done < <(grep -rn --include='*.yml' -E '^\s*(-\s*)?uses:' .github/workflows examples 2>/dev/null || true)
+
+          if [ "$fail" -eq 1 ]; then
+            echo ""
+            echo "Pin with: uses: owner/repo@<full-sha> # vX.Y.Z"
+            exit 1
+          fi
+          echo "All third-party actions are SHA-pinned. ✅"

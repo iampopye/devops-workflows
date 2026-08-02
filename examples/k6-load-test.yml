@@ -1,0 +1,107 @@
+# k6 load test.
+#
+# Modernised from the original `k6-loadtest-script.txt` draft:
+#   - replaced the manual apt install with the official setup-k6 action. The
+#     draft used `apt-key add`, which has been deprecated since Ubuntu 22.04
+#     and prints a warning on every run.
+#   - actions/checkout v3 -> v7
+#   - added thresholds so the job actually fails on a regression. Without them
+#     k6 exits 0 no matter how bad the numbers are, which makes the whole run
+#     decorative.
+#   - added a summary artifact and a job summary
+
+name: Load Test with k6
+
+on:
+  push:
+    branches: [stage]
+  workflow_dispatch:
+    inputs:
+      vus:
+        description: Virtual users
+        required: false
+        default: "10"
+      duration:
+        description: Test duration (e.g. 30s, 5m)
+        required: false
+        default: "30s"
+
+permissions: {}
+
+jobs:
+  k6-load-test:
+    name: k6 load test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install k6
+        uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1.2.1
+
+      - name: Run load test
+        env:
+          K6_VUS: ${{ inputs.vus || '10' }}
+          K6_DURATION: ${{ inputs.duration || '30s' }}
+          BASE_URL: ${{ vars.LOAD_TEST_BASE_URL }}
+        run: |
+          set -euo pipefail
+          k6 run \
+            --vus "${K6_VUS}" \
+            --duration "${K6_DURATION}" \
+            --summary-export=k6-summary.json \
+            loadtest.js
+
+      - name: Publish summary
+        if: always()
+        run: |
+          set -euo pipefail
+          [ -f k6-summary.json ] || exit 0
+          {
+            echo "### k6 load test"
+            echo ""
+            echo "| Metric | Value |"
+            echo "| --- | --- |"
+            jq -r '
+              "| Requests | \(.metrics.http_reqs.count // "n/a") |",
+              "| Failed | \(((.metrics.http_req_failed.value // 0) * 100 | tostring)[0:5])% |",
+              "| p95 latency | \(((.metrics.http_req_duration["p(95)"] // 0) | tostring)[0:7]) ms |",
+              "| Median latency | \(((.metrics.http_req_duration.med // 0) | tostring)[0:7]) ms |"
+            ' k6-summary.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: k6-summary
+          path: k6-summary.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+# ---------------------------------------------------------------------------
+# Companion loadtest.js. Put this at the repo root.
+#
+# The `thresholds` block is the important part -- it is what turns this from a
+# script that prints numbers into a test that can fail.
+#
+# import http from 'k6/http';
+# import { check, sleep } from 'k6';
+#
+# export const options = {
+#   thresholds: {
+#     // Fail the run if more than 1% of requests error...
+#     http_req_failed: ['rate<0.01'],
+#     // ...or if the 95th percentile exceeds 500ms.
+#     http_req_duration: ['p(95)<500'],
+#   },
+# };
+#
+# export default function () {
+#   const res = http.get(`${__ENV.BASE_URL}/health`);
+#   check(res, { 'status is 200': (r) => r.status === 200 });
+#   sleep(1);
+# }
+# ---------------------------------------------------------------------------

@@ -1,0 +1,97 @@
+# Standalone Go build + test + SonarQube analysis.
+#
+# Modernised from the original `Go tests and SonarQube analysis.txt` draft:
+#   - actions/checkout v2 -> v7, setup-go v2 -> v7, artifact actions to current
+#   - sonarqube-scan-action pinned to a SHA instead of @master
+#   - added an explicit permissions block (the draft had none, so it inherited
+#     whatever the repo default was)
+#   - go-version now reads from go.mod instead of being hardcoded and drifting
+
+name: Go Build and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # SonarQube needs full history for accurate blame and new-code detection.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # Single source of truth. Hardcoding '1.23' here means it silently
+          # drifts from go.mod the moment someone upgrades.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum \
+            || { echo "::error::go.mod/go.sum are not tidy. Run 'go mod tidy'."; exit 1; }
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run tests with coverage
+        run: go test ./... -v -race -coverprofile=coverage.out -covermode=atomic
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 7
+
+  sonarqube:
+    name: SonarQube analysis
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage
+
+      - name: SonarQube scan
+        # The original draft used @master -- a moving target that runs whatever
+        # SonarSource pushes next, with your SONAR_TOKEN in scope.
+        uses: sonarsource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.go.coverage.reportPaths=coverage.out
+
+      - name: SonarQube quality gate
+        # The draft had this commented out. Leaving it off means the scan
+        # uploads results and always passes -- a dashboard, not a gate.
+        uses: sonarsource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b # v1.2.0
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

@@ -1,68 +1,244 @@
 name: Reusable AI Incident Analysis
 
+# Summarises recent failed workflow runs and opens an issue with the analysis.
+#
+# OPTIONAL AND VENDOR-NEUTRAL, exactly like the PR review workflow. You supply
+# the provider and model; there is no default model, so no vendor is implied.
+#
+# Built-in presets (no api_url needed):
+#   anthropic, openai, groq, openrouter, together, mistral, deepseek
+#
+# Anything else:
+#   openai_compatible + api_url -> Ollama, vLLM, llama.cpp, LM Studio,
+#   Azure OpenAI, Fireworks, or a self-hosted model.
+#
+# Typically run on a schedule or via workflow_dispatch, not on every push.
+
 on:
   workflow_call:
     inputs:
-      model:
-        required: false
+      provider:
+        description: >-
+          anthropic | openai | groq | openrouter | together | mistral |
+          deepseek | openai_compatible
+        required: true
         type: string
-        default: gpt-4o-mini
-      incident_context:
+      model:
+        description: Model identifier. Required -- no default, so no vendor is assumed.
+        required: true
+        type: string
+      api_url:
+        description: >-
+          Full endpoint URL. Required for openai_compatible. Optional for every
+          other provider, where it OVERRIDES that provider's built-in URL --
+          useful for a proxy, a gateway, or a regional endpoint. Leave empty to
+          use the built-in URL.
         required: false
         type: string
         default: ""
+      incident_context:
+        description: Extra context to give the model (recent deploys, known issues)
+        required: false
+        type: string
+        default: ""
+      lookback_runs:
+        description: How many recent failed runs to analyse
+        required: false
+        type: number
+        default: 10
+      max_tokens:
+        description: Maximum tokens in the model response
+        required: false
+        type: number
+        default: 2000
+      dry_run:
+        description: Write the analysis to the job summary instead of opening an issue
+        required: false
+        type: boolean
+        default: false
     secrets:
-      openai_api_key:
-        required: true
+      ai_api_key:
+        description: API key for the chosen provider. Omit for a local endpoint that needs no auth.
+        required: false
 
-permissions:
-  actions: read
-  contents: read
-  issues: write
+permissions: {}
 
 jobs:
   incident-analysis:
+    name: AI incident analysis
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
     steps:
-      - name: Analyze failed runs with AI
-        uses: actions/github-script@v7
+      - name: Analyse recent failures
+        uses: actions/github-script@v9
         env:
-          OPENAI_API_KEY: ${{ secrets.openai_api_key }}
+          AI_API_KEY: ${{ secrets.ai_api_key }}
+          PROVIDER: ${{ inputs.provider }}
           MODEL: ${{ inputs.model }}
+          API_URL: ${{ inputs.api_url }}
           INCIDENT_CONTEXT: ${{ inputs.incident_context }}
+          LOOKBACK: ${{ inputs.lookback_runs }}
+          MAX_TOKENS: ${{ inputs.max_tokens }}
+          DRY_RUN: ${{ inputs.dry_run }}
         with:
           github-token: ${{ github.token }}
           script: |
             const { owner, repo } = context.repo;
-            const runs = await github.rest.actions.listWorkflowRunsForRepo({ owner, repo, per_page: 5, status: 'failure' });
-            const failures = runs.data.workflow_runs.map(r => ({
+
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({
+              owner,
+              repo,
+              status: 'failure',
+              per_page: Number(process.env.LOOKBACK),
+            });
+
+            const failures = runs.data.workflow_runs.map((r) => ({
               name: r.name,
               run_number: r.run_number,
               url: r.html_url,
-              conclusion: r.conclusion,
-              created_at: r.created_at
+              branch: r.head_branch,
+              event: r.event,
+              created_at: r.created_at,
             }));
-            const prompt = `Analyze these recent CI/CD failures and produce: probable root cause, blast radius, immediate mitigations, and prevention steps.\n\nFailures: ${JSON.stringify(failures, null, 2)}\n\nContext: ${process.env.INCIDENT_CONTEXT}`;
-            const aiResp = await fetch('https://api.openai.com/v1/chat/completions', {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                model: process.env.MODEL,
-                messages: [
-                  { role: 'system', content: 'You are an SRE incident commander assistant.' },
-                  { role: 'user', content: prompt }
-                ],
-                temperature: 0.1
-              })
-            });
-            const aiData = await aiResp.json();
-            const analysis = aiData.choices?.[0]?.message?.content || 'Analysis unavailable.';
-            await github.rest.issues.create({
+
+            if (failures.length === 0) {
+              core.info('No failed runs found. Nothing to analyse.');
+              await core.summary
+                .addHeading('AI Incident Analysis')
+                .addRaw('No failed workflow runs in the lookback window. ✅')
+                .write();
+              return;
+            }
+
+            const provider = process.env.PROVIDER;
+            const model = process.env.MODEL;
+            const key = process.env.AI_API_KEY || '';
+            const maxTokens = Number(process.env.MAX_TOKENS);
+            const system = 'You are an SRE incident commander assistant. Be concrete and brief.';
+            const userPrompt = [
+              'Analyse these recent CI/CD failures. Produce:',
+              '1. Probable root cause (state your confidence)',
+              '2. Blast radius',
+              '3. Immediate mitigations',
+              '4. Prevention steps',
+              '',
+              'If the failures look unrelated, say so rather than inventing a common cause.',
+              '',
+              `Failures:\n${JSON.stringify(failures, null, 2)}`,
+              '',
+              `Additional context: ${process.env.INCIDENT_CONTEXT || '(none provided)'}`,
+            ].join('\n');
+
+            // --- Provider adapters -------------------------------------------
+            // Same table as reusable-ai-pr-review.yml. Most vendors speak the
+            // OpenAI chat/completions shape and differ only by base URL.
+            const OPENAI_SHAPED = {
+              openai:     { url: 'https://api.openai.com/v1/chat/completions', newTokenField: true },
+              groq:       { url: 'https://api.groq.com/openai/v1/chat/completions' },
+              openrouter: { url: 'https://openrouter.ai/api/v1/chat/completions' },
+              together:   { url: 'https://api.together.xyz/v1/chat/completions' },
+              mistral:    { url: 'https://api.mistral.ai/v1/chat/completions' },
+              deepseek:   { url: 'https://api.deepseek.com/chat/completions' },
+              // Bring your own endpoint: Ollama, vLLM, llama.cpp, LM Studio,
+              // Azure OpenAI, Fireworks, or anything else OpenAI-shaped.
+              openai_compatible: { url: null },
+            };
+
+            const adapters = {};
+            for (const [name, cfg] of Object.entries(OPENAI_SHAPED)) {
+              adapters[name] = {
+                url: process.env.API_URL || cfg.url,
+                headers: () => (key ? { Authorization: `Bearer ${key}` } : {}),
+                body: () => ({
+                  model,
+                  ...(cfg.newTokenField
+                    ? { max_completion_tokens: maxTokens }
+                    : { max_tokens: maxTokens }),
+                  messages: [
+                    { role: 'system', content: system },
+                    { role: 'user', content: userPrompt },
+                  ],
+                }),
+                parse: (d) => d.choices?.[0]?.message?.content,
+              };
+            }
+
+            adapters.anthropic = {
+              url: process.env.API_URL || 'https://api.anthropic.com/v1/messages',
+              headers: () => ({ 'x-api-key': key, 'anthropic-version': '2023-06-01' }),
+              body: () => ({
+                model,
+                max_tokens: maxTokens,
+                system,
+                messages: [{ role: 'user', content: userPrompt }],
+              }),
+              parse: (d) => d.content?.find((b) => b.type === 'text')?.text,
+            };
+
+            const adapter = adapters[provider];
+            if (!adapter) {
+              core.setFailed(
+                `Unknown provider "${provider}". Expected one of: ${Object.keys(adapters).join(', ')}`
+              );
+              return;
+            }
+            if (!adapter.url) {
+              core.setFailed(`provider "${provider}" requires the api_url input.`);
+              return;
+            }
+
+            let analysis;
+            try {
+              const res = await fetch(adapter.url, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', ...adapter.headers() },
+                body: JSON.stringify(adapter.body()),
+              });
+              if (!res.ok) {
+                throw new Error(`${provider} returned HTTP ${res.status} ${res.statusText}`);
+              }
+              analysis = adapter.parse(await res.json());
+            } catch (err) {
+              core.setFailed(`AI analysis failed: ${err.message}`);
+              return;
+            }
+
+            if (!analysis) {
+              core.setFailed('Provider returned no usable text.');
+              return;
+            }
+
+            const runList = failures
+              .map((f) => `- [${f.name} #${f.run_number}](${f.url}) — \`${f.branch}\` (${f.created_at})`)
+              .join('\n');
+            const body = [
+              '## Automated Incident Analysis',
+              '',
+              analysis,
+              '',
+              '---',
+              '### Runs analysed',
+              runList,
+              '',
+              `<sub>Generated by \`reusable-ai-incident-analysis.yml\` — model \`${model}\` via \`${provider}\`. Advisory only.</sub>`,
+            ].join('\n');
+
+            if (process.env.DRY_RUN === 'true') {
+              await core.summary.addRaw(body).write();
+              core.info('dry_run enabled; wrote analysis to job summary instead of opening an issue.');
+              return;
+            }
+
+            // Date comes from the runner clock; fine for a human-readable title.
+            const today = new Date().toISOString().slice(0, 10);
+            const issue = await github.rest.issues.create({
               owner,
               repo,
-              title: `AI Incident Analysis - ${new Date().toISOString().slice(0, 10)}`,
-              body: `## Automated Incident Analysis\n\n${analysis}`
+              title: `AI Incident Analysis — ${today}`,
+              body,
+              labels: ['incident', 'automated'],
             });
+            core.info(`Opened issue #${issue.data.number}`);

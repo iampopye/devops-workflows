@@ -1,54 +1,142 @@
 name: Reusable Kubernetes Deployment
 
+# Server-side manifest validation, then an optional apply and rollout wait.
+#
+# Prefer OIDC federation to your cluster over a base64 kubeconfig secret. A
+# kubeconfig is long-lived, hard to rotate, and usually over-privileged. This
+# workflow supports it because plenty of clusters still need it -- treat it as
+# the fallback, not the goal.
+
 on:
   workflow_call:
     inputs:
       namespace:
+        description: Target namespace
         required: false
         type: string
         default: default
       manifests_path:
+        description: Path to manifests (file or directory)
         required: false
         type: string
         default: k8s/
       kubectl_version:
+        description: kubectl version to install
         required: false
         type: string
-        default: v1.31.2
+        default: v1.34.1
       dry_run:
+        description: Validate only. Set false to actually apply.
         required: false
         type: boolean
         default: true
+      environment:
+        description: GitHub environment name. Use its protection rules to gate deploys.
+        required: false
+        type: string
+        default: ""
+      rollout_timeout:
+        description: How long to wait for workloads to become ready
+        required: false
+        type: string
+        default: 5m
     secrets:
       kubeconfig:
+        description: Base64 encoded kubeconfig
         required: true
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   deploy:
+    name: ${{ inputs.dry_run && 'Validate' || 'Deploy' }} to ${{ inputs.namespace }}
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
         with:
           version: ${{ inputs.kubectl_version }}
 
       - name: Configure kubeconfig
-        run: |
-          mkdir -p ~/.kube
-          echo "${KUBECONFIG_CONTENT}" | base64 -d > ~/.kube/config
-          chmod 600 ~/.kube/config
         env:
           KUBECONFIG_CONTENT: ${{ secrets.kubeconfig }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.kube"
+          # umask before writing, so the file is never briefly world-readable
+          # between creation and chmod.
+          umask 077
+          if ! printf '%s' "${KUBECONFIG_CONTENT}" | base64 -d > "${HOME}/.kube/config" 2>/dev/null; then
+            echo "::error::Could not base64-decode the kubeconfig secret. Store it as: base64 -w0 < ~/.kube/config"
+            exit 1
+          fi
+          if [ ! -s "${HOME}/.kube/config" ]; then
+            echo "::error::Decoded kubeconfig is empty."
+            exit 1
+          fi
 
-      - name: Validate manifests server-side
-        run: kubectl apply --namespace "${{ inputs.namespace }}" --dry-run=server -f "${{ inputs.manifests_path }}"
+      - name: Verify cluster connectivity
+        run: kubectl version --output=yaml
 
-      - name: Deploy manifests
+      - name: Validate manifests (server-side dry run)
+        run: |
+          kubectl apply \
+            --namespace "${{ inputs.namespace }}" \
+            --dry-run=server \
+            -f "${{ inputs.manifests_path }}"
+
+      - name: Apply manifests
         if: ${{ !inputs.dry_run }}
-        run: kubectl apply --namespace "${{ inputs.namespace }}" -f "${{ inputs.manifests_path }}"
+        run: |
+          kubectl apply \
+            --namespace "${{ inputs.namespace }}" \
+            -f "${{ inputs.manifests_path }}"
+
+      - name: Wait for rollout
+        if: ${{ !inputs.dry_run }}
+        env:
+          NS: ${{ inputs.namespace }}
+          MANIFESTS: ${{ inputs.manifests_path }}
+          TIMEOUT: ${{ inputs.rollout_timeout }}
+        run: |
+          set -euo pipefail
+          # An apply that returns 0 only means the API server accepted the
+          # object. Without this wait, a CrashLoopBackOff still reports green.
+          #
+          # Use `-o name` rather than a jsonpath over `.items`: when the path
+          # resolves to a single manifest, kubectl returns a bare object with
+          # no `.items` array, so the jsonpath silently yields nothing and the
+          # loop never runs -- reporting success without waiting for anything.
+          # `-o name` emits `kind/name` lines for both shapes.
+          targets="$(kubectl get -f "${MANIFESTS}" --namespace "${NS}" -o name \
+            | grep -E '^(deployment|statefulset|daemonset)(\.apps)?/' || true)"
+
+          if [ -z "${targets}" ]; then
+            echo "::warning::No Deployment/StatefulSet/DaemonSet found in ${MANIFESTS}; nothing to wait for."
+            exit 0
+          fi
+
+          echo "Waiting on:"
+          for target in ${targets}; do
+            echo "  ${target}"
+          done
+
+          # A `while read` in a pipeline runs in a subshell, so a rollout
+          # failure there would not fail the step. A for loop keeps set -e.
+          for target in ${targets}; do
+            echo "::group::rollout ${target}"
+            kubectl rollout status "${target}" \
+              --namespace "${NS}" \
+              --timeout "${TIMEOUT}"
+            echo "::endgroup::"
+          done
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f "${HOME}/.kube/config"
