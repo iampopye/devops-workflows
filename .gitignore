@@ -1,0 +1,42 @@
+# Tooling downloaded during local validation
+actionlint
+shellcheck
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+plan.txt
+.terraformrc
+terraform.rc
+
+# Credentials — never commit these. Push protection is enabled on this repo,
+# but the first line of defence is not writing them to disk in the first place.
+*.pem
+*.key
+kubeconfig
+.env
+.env.*
+!.env.example
+gha-creds-*.json
+credentials.json
+service-account*.json
+
+# Scan output
+trivy-results.sarif
+trivy-config.sarif
+*.sarif
+zap_report.*
+report_html.html
+report_md.md
+report_json.json
+coverage.out
+k6-summary.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
