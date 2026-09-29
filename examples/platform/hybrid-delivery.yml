@@ -1,0 +1,61 @@
+# Copy into the APPLICATION repo; replace REVIEWED_SHA in uses and toolkit_ref.
+# This is a caller template, not an enabled deployment in this toolkit repository.
+name: Hybrid application delivery
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Release destination
+        type: choice
+        options: [iis, azure]
+        required: true
+permissions: {}
+jobs:
+  build:
+    uses: iampopye/devops-workflows/.github/workflows/reusable-hybrid-build.yml@REVIEWED_SHA
+    permissions:
+      contents: read
+    with:
+      toolkit_ref: REVIEWED_SHA
+      project: src/Api/Api.csproj
+      test_project: tests/Api.Tests/Api.Tests.csproj
+      spa_directory: src/web
+  migrations:
+    needs: build
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment: database-release
+    permissions: {}
+    steps:
+      - name: Integrate approved migration gate
+        run: |
+          echo 'Replace this fail-closed step with your reviewed, idempotent database expand/verification job.'
+          exit 1
+  iis:
+    needs: [build, migrations]
+    if: inputs.target == 'iis'
+    uses: iampopye/devops-workflows/.github/workflows/reusable-iis-blue-green.yml@REVIEWED_SHA
+    permissions:
+      contents: read
+    with:
+      toolkit_ref: REVIEWED_SHA
+      artifact_name: ${{ needs.build.outputs.artifact_name }}
+      environment: onprem-production
+      inventory: deploy/iis-inventory.json
+      adapter: deploy/Iis-Adapter.ps1
+  azure:
+    needs: [build, migrations]
+    if: inputs.target == 'azure'
+    uses: iampopye/devops-workflows/.github/workflows/reusable-azure-slot-release.yml@REVIEWED_SHA
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      toolkit_ref: REVIEWED_SHA
+      artifact_name: ${{ needs.build.outputs.artifact_name }}
+      environment: azure-production
+      resource_group: ${{ vars.AZURE_RESOURCE_GROUP }}
+      app_name: ${{ vars.AZURE_APP_NAME }}
+      client_id: ${{ vars.AZURE_CLIENT_ID }}
+      tenant_id: ${{ vars.AZURE_TENANT_ID }}
+      subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}

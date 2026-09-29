@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — platform workflow additions
+
+- Add seven top-level reusable workflows for hybrid app delivery, Azure Terraform, secure containers, Helm validation and Ansible.
+- Add Azure DevOps templates, reference modules/chart, release failure-path tests and portfolio/runbook documentation.
+- Preserve the existing workflow collection; document its legacy subdirectory limitation.
+
 All notable changes to this project are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

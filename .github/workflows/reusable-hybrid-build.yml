@@ -1,0 +1,80 @@
+name: 'Build once: .NET 10 and React'
+'on':
+  workflow_call:
+    inputs:
+      toolkit_ref:
+        description: Full reviewed 40-character commit SHA of this toolkit; use the same SHA as the workflow reference.
+        required: true
+        type: string
+      project:
+        description: ASP.NET Core project path, targeting net10.0.
+        required: true
+        type: string
+      test_project:
+        description: Test project or solution path; tests are mandatory.
+        required: true
+        type: string
+      spa_directory:
+        description: React directory with package-lock.json and build/test:ci scripts.
+        required: true
+        type: string
+      spa_output:
+        description: Build output directory relative to spa_directory.
+        required: false
+        type: string
+        default: dist
+    outputs:
+      artifact_name:
+        description: Immutable artifact name for this run.
+        value: ${{ jobs.build.outputs.artifact_name }}
+permissions: {}
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.meta.outputs.name }}
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - name: Validate toolkit pin
+      shell: pwsh
+      run: if ($env:TOOLKIT_REF -notmatch '^[a-f0-9]{40}$') { throw 'toolkit_ref must be a full commit SHA' }
+      env:
+        TOOLKIT_REF: ${{ inputs.toolkit_ref }}
+    - name: Checkout reviewed toolkit scripts
+      uses: actions/checkout@v7
+      with:
+        repository: iampopye/devops-workflows
+        ref: ${{ inputs.toolkit_ref }}
+        path: .toolkit
+        persist-credentials: false
+    - uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: 10.0.x
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+    - name: Build, test and package
+      shell: pwsh
+      run: '& ./.toolkit/scripts/hybrid/Build-Package.ps1 -Project $env:PROJECT -TestProject $env:TEST_PROJECT -SpaDirectory
+        $env:SPA_DIR -SpaOutput $env:SPA_OUTPUT -Version $env:RELEASE_VERSION -Commit $env:SOURCE_SHA'
+      env:
+        PROJECT: ${{ inputs.project }}
+        TEST_PROJECT: ${{ inputs.test_project }}
+        SPA_DIR: ${{ inputs.spa_directory }}
+        SPA_OUTPUT: ${{ inputs.spa_output }}
+        RELEASE_VERSION: ${{ github.run_id }}.${{ github.run_attempt }}
+        SOURCE_SHA: ${{ github.sha }}
+    - id: meta
+      shell: pwsh
+      run: '"name=hybrid-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT'
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.meta.outputs.name }}
+        path: release/
+        if-no-files-found: error
+        retention-days: 30

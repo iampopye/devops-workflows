@@ -1,0 +1,7 @@
+{
+  "environment": "lab",
+  "nodes": ["iis01.example.internal", "iis02.example.internal", "iis03.example.internal"],
+  "sitePrefix": "orders",
+  "releaseRoot": "D:\\Releases\\orders",
+  "publicHealthUri": "https://orders.example.internal/health/ready"
+}

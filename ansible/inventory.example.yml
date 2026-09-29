@@ -1,0 +1,16 @@
+---
+all:
+  children:
+    iis:
+      hosts:
+        iis01.example.internal:
+        iis02.example.internal:
+        iis03.example.internal:
+      vars:
+        ansible_connection: winrm
+        ansible_port: 5986
+        ansible_winrm_scheme: https
+        ansible_winrm_transport: kerberos
+        ansible_winrm_server_cert_validation: validate
+        # Runner obtains a short-lived Kerberos ticket before starting the job.
+        ansible_winrm_kinit_mode: manual

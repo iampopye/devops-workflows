@@ -1,0 +1,35 @@
+# Job template: copy scripts/hybrid into the application repo before using.
+parameters:
+  - name: project
+    type: string
+  - name: testProject
+    type: string
+  - name: spaDirectory
+    type: string
+  - name: spaOutput
+    type: string
+    default: dist
+jobs:
+  - job: Build
+    pool:
+      vmImage: windows-latest
+    steps:
+      - checkout: self
+        clean: true
+        persistCredentials: false
+      - task: UseDotNet@2
+        inputs:
+          packageType: sdk
+          version: 10.0.x
+      - task: NodeTool@0
+        inputs:
+          versionSpec: 22.x
+      - pwsh: |
+          ./scripts/hybrid/Build-Package.ps1 -Project $env:PROJECT -TestProject $env:TEST_PROJECT -SpaDirectory $env:SPA_DIRECTORY -SpaOutput $env:SPA_OUTPUT -Version "$env:BUILD_BUILDID.$env:SYSTEM_JOBATTEMPT" -Commit $env:BUILD_SOURCEVERSION
+        env:
+          PROJECT: ${{ parameters.project }}
+          TEST_PROJECT: ${{ parameters.testProject }}
+          SPA_DIRECTORY: ${{ parameters.spaDirectory }}
+          SPA_OUTPUT: ${{ parameters.spaOutput }}
+      - publish: release
+        artifact: hybrid-release

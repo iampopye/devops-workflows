@@ -1,0 +1,33 @@
+---
+- name: Reproduce Windows IIS prerequisites one host at a time
+  hosts: iis
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Install IIS and management tools
+      ansible.windows.win_feature:
+        name:
+          - Web-Server
+          - Web-Mgmt-Tools
+          - Web-Http-Logging
+          - Web-Request-Monitor
+        state: present
+        include_management_tools: true
+      register: iis_features
+
+    - name: Require an explicit drained maintenance window for reboot
+      ansible.builtin.fail:
+        msg: Reboot required. Drain this host and use the approved maintenance runbook before retrying.
+      when: iis_features.reboot_required
+
+    - name: Ensure IIS service is running
+      ansible.windows.win_service:
+        name: W3SVC
+        start_mode: auto
+        state: started
+
+    - name: Create release root
+      ansible.windows.win_file:
+        path: D:\Releases
+        state: directory
