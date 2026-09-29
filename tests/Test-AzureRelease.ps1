@@ -37,4 +37,6 @@ try {
 } finally {
     Remove-Item $tmp -Recurse -Force
     Remove-Item Function:\az,Function:\Invoke-WebRequest,Function:\Invoke-RestMethod,Function:\Start-Sleep
+    # The simulated CLI failure must not leak into GitHub Actions shell exit handling.
+    $global:LASTEXITCODE = 0
 }
