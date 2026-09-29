@@ -1,0 +1,106 @@
+name: 'Azure Terraform: OIDC plan and gated apply'
+'on':
+  workflow_call:
+    inputs:
+      working_directory:
+        description: Root module directory.
+        required: false
+        type: string
+        default: infra
+      terraform_version:
+        description: Reviewed exact Terraform version.
+        required: false
+        type: string
+        default: 1.14.3
+      environment:
+        description: Protected apply environment.
+        required: false
+        type: string
+        default: azure-infra
+      plan_environment:
+        description: Separate read-only OIDC environment for planning.
+        required: false
+        type: string
+        default: azure-plan
+      apply:
+        description: Apply saved plan after environment approval; default branch only.
+        required: false
+        type: boolean
+        default: false
+permissions: {}
+jobs:
+  plan:
+    if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && github.ref == format('refs/heads/{0}',
+      github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.plan_environment }}
+    permissions:
+      contents: read
+      id-token: write
+    env: &id001
+      ARM_USE_OIDC: 'true'
+      ARM_USE_AZUREAD: 'true'
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    defaults: &id002
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - &id003
+      uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+        terraform_wrapper: false
+    - name: Validate and save plan
+      run: 'set -euo pipefail
+
+        terraform fmt -check -recursive
+
+        terraform init -input=false -lockfile=readonly
+
+        terraform validate
+
+        terraform plan -input=false -lock-timeout=5m -out=tfplan
+
+        sha256sum tfplan > tfplan.sha256'
+    - uses: actions/upload-artifact@v4
+      with:
+        name: azure-tfplan-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ inputs.working_directory }}/tfplan*
+        retention-days: 1
+        if-no-files-found: error
+  apply:
+    needs: plan
+    if: inputs.apply
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    env: *id001
+    defaults: *id002
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - *id003
+    - uses: actions/download-artifact@v4
+      with:
+        name: azure-tfplan-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ inputs.working_directory }}
+    - name: Apply reviewed saved plan
+      run: 'set -euo pipefail
+
+        sha256sum -c tfplan.sha256
+
+        terraform init -input=false -lockfile=readonly
+
+        terraform apply -input=false -lock-timeout=5m tfplan'
+concurrency:
+  group: azure-tf-${{ github.repository }}-${{ inputs.environment }}-${{ inputs.working_directory }}
+  cancel-in-progress: false

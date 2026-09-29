@@ -1,0 +1,67 @@
+name: 'Ansible: controlled Windows baseline'
+'on':
+  workflow_call:
+    inputs:
+      playbook:
+        description: Reviewed playbook path.
+        required: false
+        type: string
+        default: ansible/iis-baseline.yml
+      inventory:
+        description: Inventory file path.
+        required: false
+        type: string
+        default: ansible/inventory.example.yml
+      environment:
+        description: Protected environment with runner credentials.
+        required: false
+        type: string
+        default: onprem-lab
+      runner_labels:
+        description: JSON labels for isolated Linux runner with WinRM connectivity.
+        required: false
+        type: string
+        default: '["self-hosted", "Linux", "ansible-deploy"]'
+      apply:
+        description: Apply changes; false runs Ansible check mode.
+        required: false
+        type: boolean
+        default: false
+permissions: {}
+jobs:
+  configure:
+    if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && github.ref == format('refs/heads/{0}',
+      github.event.repository.default_branch)
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: ansible-${{ github.repository }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - name: Validate and run approved playbook
+      shell: bash
+      env:
+        PLAYBOOK: ${{ inputs.playbook }}
+        INVENTORY: ${{ inputs.inventory }}
+        APPLY: ${{ inputs.apply }}
+      run: 'set -euo pipefail
+
+        # Tools/collections and Kerberos ticket are provisioned on the isolated runner.
+
+        # Never use --diff with potentially secret configuration.
+
+        ansible-lint "$PLAYBOOK"
+
+        ansible-playbook -i "$INVENTORY" "$PLAYBOOK" --syntax-check
+
+        args=(--check)
+
+        if [[ "$APPLY" == true ]]; then args=(); fi
+
+        ansible-playbook -i "$INVENTORY" "$PLAYBOOK" "${args[@]}"'

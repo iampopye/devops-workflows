@@ -1,0 +1,55 @@
+name: 'Kubernetes: validate Helm for GitOps'
+'on':
+  workflow_call:
+    inputs:
+      chart:
+        description: Helm chart directory.
+        required: false
+        type: string
+        default: charts/service
+      values_file:
+        description: Environment values file.
+        required: false
+        type: string
+        default: charts/service/values.yaml
+      helm_version:
+        description: Reviewed exact Helm version.
+        required: false
+        type: string
+        default: v3.17.3
+permissions: {}
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      with:
+        version: ${{ inputs.helm_version }}
+    - name: Lint and render without cluster credentials
+      shell: bash
+      env:
+        CHART: ${{ inputs.chart }}
+        VALUES: ${{ inputs.values_file }}
+      run: 'set -euo pipefail
+
+        # Commit Chart.lock for charts with dependencies. Never update dependencies here.
+
+        helm dependency build "$CHART"
+
+        helm lint "$CHART" --strict -f "$VALUES"
+
+        helm template review "$CHART" -f "$VALUES" > rendered.yaml
+
+        test -s rendered.yaml'
+    - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        scan-type: config
+        scan-ref: rendered.yaml
+        severity: HIGH,CRITICAL
+        exit-code: '1'

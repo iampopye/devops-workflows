@@ -1,0 +1,63 @@
+# Stage template. Caller provides Build and Migrate stages; Migrate owns the DB approval.
+# Pre-create Azure DevOps environments with checks, branch control and an exclusive lock.
+parameters:
+  - name: target
+    type: string
+    values: [iis, azure]
+  - name: environment
+    type: string
+  - name: pool
+    type: string
+  - name: serviceConnection
+    type: string
+    default: ''
+  - name: resourceGroup
+    type: string
+    default: ''
+  - name: appName
+    type: string
+    default: ''
+  - name: inventory
+    type: string
+    default: deploy/iis-inventory.json
+  - name: adapter
+    type: string
+    default: deploy/Iis-Adapter.ps1
+stages:
+  - stage: Release
+    dependsOn: [Build, Migrate]
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    lockBehavior: sequential
+    jobs:
+      - deployment: HybridRelease
+        environment: ${{ parameters.environment }}
+        pool:
+          name: ${{ parameters.pool }}
+        workspace:
+          clean: all
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  clean: true
+                  persistCredentials: false
+                - download: current
+                  artifact: hybrid-release
+                - ${{ if eq(parameters.target, 'iis') }}:
+                    - pwsh: |
+                        ./scripts/hybrid/Invoke-IisRelease.ps1 -ReleaseDirectory "$env:PIPELINE_WORKSPACE/hybrid-release" -InventoryPath $env:INVENTORY -AdapterPath $env:ADAPTER
+                      env:
+                        INVENTORY: ${{ parameters.inventory }}
+                        ADAPTER: ${{ parameters.adapter }}
+                - ${{ if eq(parameters.target, 'azure') }}:
+                    - task: AzureCLI@2
+                      inputs:
+                        azureSubscription: ${{ parameters.serviceConnection }}
+                        scriptType: pscore
+                        scriptLocation: inlineScript
+                        inlineScript: |
+                          ./scripts/hybrid/Invoke-AzureRelease.ps1 -ReleaseDirectory "$env:PIPELINE_WORKSPACE/hybrid-release" -ResourceGroup $env:RESOURCE_GROUP -AppName $env:APP_NAME
+                      env:
+                        RESOURCE_GROUP: ${{ parameters.resourceGroup }}
+                        APP_NAME: ${{ parameters.appName }}

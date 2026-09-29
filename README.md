@@ -12,6 +12,16 @@ Every workflow here is a **reusable workflow**. You do not fork this repo or pas
 
 ---
 
+## New: DevSecOps and hybrid platform collection
+
+Seven new reusable workflows cover **Terraform, Docker, Kubernetes/Helm, Ansible, .NET/React, IIS blue-green and Azure App Service**. Azure DevOps YAML templates, PowerShell failure-path tests, a Terraform networking module, a hardened Helm chart and operational runbooks accompany them.
+
+Start with the [platform catalog](docs/platform/README.md), [workflow input reference](docs/platform/workflow-inputs.md) and [portfolio/interview walkthrough](docs/platform/portfolio.md). These additions are reference implementations: infrastructure integration and lab deployment evidence are required before production use.
+
+**Placement note:** new workflows are at `.github/workflows/reusable-*.yml`, as GitHub requires. Legacy workflows below remain in their original subfolders and cannot be called there. Their migration is separate. New additions are not part of the existing `v1` release; use a reviewed commit SHA.
+
+---
+
 ## Quick start
 
 Create `.github/workflows/ci.yml` in **your** repository and paste this in:
