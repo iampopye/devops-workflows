@@ -89,7 +89,7 @@ jobs:
       with:
         persist-credentials: false
     - *id003
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v8
       with:
         name: azure-tfplan-${{ github.run_id }}-${{ github.run_attempt }}
         path: ${{ inputs.working_directory }}
