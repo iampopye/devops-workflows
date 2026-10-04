@@ -72,7 +72,7 @@ jobs:
         image-ref: ${{ inputs.image_name }}:sha-${{ github.sha }}
         format: spdx-json
         output: sbom.spdx.json
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v7
       with:
         name: sbom-${{ github.run_id }}-${{ github.run_attempt }}
         path: sbom.spdx.json
