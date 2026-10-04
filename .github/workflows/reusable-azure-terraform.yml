@@ -68,7 +68,7 @@ jobs:
         terraform plan -input=false -lock-timeout=5m -out=tfplan
 
         sha256sum tfplan > tfplan.sha256'
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v7
       with:
         name: azure-tfplan-${{ github.run_id }}-${{ github.run_attempt }}
         path: ${{ inputs.working_directory }}/tfplan*
